@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">
+    <title>DiskStatsX</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="toolbar">
+        <div class="brand">
+          <img class="brand-mark" src="/assets/app-icon.png" alt="">
+          <span>DiskStatsX</span>
+        </div>
+        <form id="scan-form" class="scan-form">
+          <input id="path-input" type="text" value="/" spellcheck="false" autocomplete="off" aria-label="Scan path">
+          <button id="choose-directory-button" class="choose-directory-button" type="button">Choose...</button>
+          <button id="scan-button" type="submit">Scan</button>
+          <button id="cancel-button" class="cancel-button hidden" type="button">Cancel</button>
+        </form>
+        <div class="filter-control">
+          <button id="filter-button" class="toolbar-button" type="button" aria-expanded="false">Filters</button>
+          <div id="filter-popover" class="filter-popover" hidden>
+            <label><input id="filter-caches" type="checkbox"> Exclude caches</label>
+            <label><input id="filter-volumes" type="checkbox"> Exclude external volumes</label>
+            <label><input id="filter-system" type="checkbox"> Exclude system folders</label>
+          </div>
+        </div>
+        <div class="view-switch" role="group" aria-label="Visualization mode">
+          <button id="treemap-view-button" class="view-button active" type="button">Treemap</button>
+          <button id="sunburst-view-button" class="view-button" type="button">Sunburst</button>
+        </div>
+        <div class="view-switch layout-switch" role="group" aria-label="Table layout">
+          <button id="layout-vertical-button" class="view-button active" type="button">Stack</button>
+          <button id="layout-horizontal-button" class="view-button" type="button">Side</button>
+        </div>
+        <div id="toolbar-state" class="toolbar-state" role="status" aria-live="polite">Idle</div>
+      </header>
+
+      <main id="workspace" class="workspace layout-vertical">
+        <section class="tree-panel">
+          <div class="treemap-top">
+          <div id="tree-table-wrap" class="tree-table-wrap">
+            <table class="tree-table">
+              <thead>
+                <tr>
+                  <th data-tree-sort="name">Name</th>
+                  <th data-tree-sort="percent">Subtree Perc.</th>
+                  <th data-tree-sort="parentPercent">Perc.</th>
+                  <th data-tree-sort="size">Size</th>
+                  <th data-tree-sort="items">Items</th>
+                  <th data-tree-sort="files">Files</th>
+                  <th data-tree-sort="subdirs">Subdirs</th>
+                  <th data-tree-sort="type">Type</th>
+                </tr>
+              </thead>
+              <tbody id="treemap-table"></tbody>
+            </table>
+          </div>
+          <aside class="extension-panel">
+            <table class="extension-table">
+              <thead>
+                <tr>
+                  <th>Extension</th>
+                  <th>Color</th>
+                  <th>Description</th>
+                  <th>Bytes</th>
+                  <th>%</th>
+                </tr>
+              </thead>
+              <tbody id="extension-table"></tbody>
+            </table>
+          </aside>
+          </div>
+        </section>
+
+        <section class="visual-panel">
+          <section id="treemap-view" class="view-shell treemap-view active">
+          <div id="treemap-canvas" class="treemap-canvas">
+            <canvas id="treemap-bitmap" class="treemap-bitmap" aria-label="Disk usage treemap"></canvas>
+            <canvas id="treemap-overlay" class="treemap-overlay" aria-hidden="true"></canvas>
+            <div id="treemap-empty" class="treemap-empty">
+              <h1>Choose a folder and scan.</h1>
+              <p>The native scanner uses macOS getattrlistbulk for directory enumeration.</p>
+            </div>
+          </div>
+          </section>
+
+          <section id="sunburst-view" class="view-shell">
+            <section class="chart-pane">
+              <nav id="breadcrumb" class="breadcrumb"></nav>
+              <div class="sunburst-toolbar">
+                <span id="sunburst-segment-count" class="sunburst-segment-count">0 segments</span>
+                <label class="sunburst-control">
+                  <span>Rings</span>
+                  <select id="sunburst-rings" aria-label="Visible sunburst rings">
+                    <option value="4">4</option>
+                    <option value="6" selected>6</option>
+                    <option value="8">8</option>
+                  </select>
+                </label>
+                <label class="sunburst-toggle">
+                  <input id="sunburst-files" type="checkbox" checked>
+                  <span>Files</span>
+                </label>
+              </div>
+              <div id="chart" class="chart"></div>
+              <div id="empty-state" class="empty-state">
+                <h1>Choose a folder and scan.</h1>
+                <p>The native scanner uses macOS getattrlistbulk for directory enumeration.</p>
+              </div>
+            </section>
+
+            <aside class="side-panel utility-panel">
+              <div class="tabs" role="tablist">
+                <button id="folders-tab" class="tab active" type="button">Largest Folders</button>
+                <button id="files-tab" class="tab" type="button">Largest Files</button>
+              </div>
+
+              <div id="folders-panel" class="panel-view active">
+                <div id="largest-folders" class="folder-list"></div>
+              </div>
+
+              <div id="files-panel" class="panel-view">
+                <table class="files-table">
+                  <thead>
+                    <tr>
+                      <th data-sort="name">Name</th>
+                      <th data-sort="size">Size</th>
+                      <th data-sort="path">Path</th>
+                    </tr>
+                  </thead>
+                  <tbody id="largest-files"></tbody>
+                </table>
+              </div>
+            </aside>
+          </section>
+        </section>
+      </main>
+
+      <footer class="status-bar">
+        <div><span class="label">Files</span><span id="files-count">0</span></div>
+        <div><span class="label">Dirs</span><span id="dirs-count">0</span></div>
+        <div><span class="label">Elapsed</span><span id="elapsed">0s</span></div>
+        <div><span class="label">Total</span><span id="total-size">0 B</span></div>
+      </footer>
+    </div>
+
+    <div id="tooltip" class="tooltip" role="tooltip"></div>
+    <div id="context-menu" class="context-menu" role="menu" aria-hidden="true"></div>
+
+    <script src="/vendor/d3.min.js"></script>
+    <script type="module" src="/js/app.mjs"></script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+release/
+/scanner
+scan-result.json
+diskstatsx-scan-result.json
+.DS_Store
+npm-debug.log*
+.env
+.env.*
+coverage/
+build/*.iconset/
