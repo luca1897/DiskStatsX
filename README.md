@@ -6,7 +6,7 @@
 
 DiskStatsX is a native macOS disk space analyzer focused on fast metadata enumeration and clear, interactive visualization.
 
-The scanner is written in C and enumerates directories with Apple's `getattrlistbulk()` API. There is no `readdir()`/`stat()` fallback scanner. Results are streamed through a local Node.js service and rendered as an interactive Treemap or Sunburst inside an Electron desktop app.
+The scanner is written in C and enumerates directories with Apple's `getattrlistbulk()` API. Results are streamed through a local Node.js service and rendered as an interactive Treemap or Sunburst inside an Electron desktop app.
 
 ## Highlights
 
@@ -24,8 +24,6 @@ The scanner is written in C and enumerates directories with Apple's `getattrlist
 - Apple Silicon desktop packaging
 
 ## Screenshots
-
-The screenshots use the built-in anonymized demo dataset. They contain no local usernames, home directories or scanned filesystem metadata.
 
 ### Treemap
 
