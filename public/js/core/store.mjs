@@ -17,7 +17,7 @@ export class AppStore {
       root: null,
       analysisNode: null,
       selectedPath: null,
-      topFiles: [],
+      largestFilesSummary: null,
       view: 'treemap',
       layout: 'vertical',
       status: { ...INITIAL_STATUS }
@@ -51,7 +51,7 @@ export class AppStore {
       root: null,
       analysisNode: null,
       selectedPath: null,
-      topFiles: [],
+      largestFilesSummary: null,
       status: {
         ...INITIAL_STATUS,
         state: 'running',

@@ -991,6 +991,35 @@ input {
   white-space: nowrap;
 }
 
+.files-table .file-group-row td {
+  background: #151c21;
+  border-bottom-color: rgba(255, 255, 255, 0.12);
+  padding-bottom: 7px;
+  padding-top: 11px;
+}
+
+.file-group-name {
+  color: var(--text);
+  display: block;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.file-group-path {
+  color: var(--muted);
+  display: block;
+  font-size: 10px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-table .aggregate-row td {
+  color: var(--muted);
+  font-style: italic;
+}
+
 .status-bar {
   align-items: center;
   background: #0d1013;

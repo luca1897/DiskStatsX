@@ -9,6 +9,7 @@ export class TreemapView {
     elements,
     extensionColor,
     tooltip,
+    onAnalyze,
     onSelect,
     onContextMenu,
     onMessage
@@ -16,6 +17,7 @@ export class TreemapView {
     this.elements = elements;
     this.extensionColor = extensionColor;
     this.tooltip = tooltip;
+    this.onAnalyze = onAnalyze;
     this.onSelect = onSelect;
     this.onContextMenu = onContextMenu;
     this.onMessage = onMessage;
@@ -27,7 +29,7 @@ export class TreemapView {
     this.renderItems = [];
     this.renderId = 0;
     this.hoveredTile = null;
-    this.fileCache = new WeakMap();
+    this.itemCache = new WeakMap();
     this.hoverFrame = 0;
     this.pendingPointer = null;
     this.worker = null;
@@ -39,7 +41,7 @@ export class TreemapView {
   setRoot(root) {
     this.root = root;
     this.scope = root;
-    this.fileCache = new WeakMap();
+    this.itemCache = new WeakMap();
     this.resizeObserver.observe(this.elements.treemapCanvas);
     this.render();
   }
@@ -65,7 +67,7 @@ export class TreemapView {
     this.scope = null;
     this.tiles = [];
     this.renderItems = [];
-    this.fileCache = new WeakMap();
+    this.itemCache = new WeakMap();
     this.elements.treemapCanvas.dataset.tileCount = '0';
     this.elements.treemapCanvas.dataset.aggregatedFileCount = '0';
     this.worker?.postMessage({ type: 'clear' });
@@ -84,7 +86,7 @@ export class TreemapView {
       TREEMAP.minTiles,
       Math.min(TREEMAP.maxTiles, Math.floor((width * height) / TREEMAP.pixelsPerTile))
     );
-    const items = this.collectFiles(this.scope, limit);
+    const items = this.collectItems(this.scope, limit);
     const dpr = window.devicePixelRatio || 1;
     const pixelWidth = Math.max(1, Math.floor(width * dpr));
     const pixelHeight = Math.max(1, Math.floor(height * dpr));
@@ -97,10 +99,13 @@ export class TreemapView {
       canvas.style.height = `${height}px`;
     }
 
-    this.renderItems = items;
+    this.renderItems = [];
+    const workerItems = items.map((item) => this.serializeItem(item));
     this.renderId++;
-    const aggregate = items.find((item) => item.path === '__other__');
-    treemapCanvas.dataset.aggregatedFileCount = String(aggregate?.fileCount || 0);
+    const aggregatedFileCount = this.renderItems
+      .filter((item) => item.synthetic)
+      .reduce((sum, item) => sum + Number(item.fileCount || 0), 0);
+    treemapCanvas.dataset.aggregatedFileCount = String(aggregatedFileCount);
     this.worker.postMessage({
       type: 'render',
       renderId: this.renderId,
@@ -108,64 +113,178 @@ export class TreemapView {
       height,
       dpr,
       highlightedExtension: this.highlightedExtension,
-      items: items.map((item) => ({
-        name: item.name,
-        path: item.path,
-        size: item.size,
-        extension: item.extension,
-        fileCount: item.fileCount || 1,
-        color: this.extensionColor(item.extension)
-      }))
+      items: workerItems
     });
   }
 
-  collectFiles(scope, limit) {
-    const files = this.sortedLeaves(scope);
+  collectItems(scope, limit) {
+    const candidates = this.sortedItems(scope);
     const minimumSize = Math.max(4096, Number(scope.value || 0) / Math.max(1, limit * 6));
-    const visibleLeaves = [];
-    for (const leaf of files) {
-      if (visibleLeaves.length >= limit) {
+    const hasExpandableDirectories = candidates.some((node) => (
+      node.data.type === 'directory' && node.children?.length
+    ));
+    const topLevelLimit = hasExpandableDirectories
+      ? Math.min(
+          limit,
+          Math.max(
+            TREEMAP.minimumTopLevelItems,
+            Math.floor(limit * TREEMAP.topLevelShare)
+          )
+        )
+      : limit;
+    const visibleNodes = [];
+    for (const node of candidates) {
+      if (visibleNodes.length >= topLevelLimit) {
         break;
       }
-      if (visibleLeaves.length >= 80 && leaf.value < minimumSize) {
+      if (visibleNodes.length >= 80 && node.value < minimumSize) {
         break;
       }
-      visibleLeaves.push(leaf);
+      visibleNodes.push(node);
     }
 
-    const visible = visibleLeaves.map((leaf) => ({
-      name: leaf.data.name,
-      path: leaf.data.path,
-      size: leaf.value,
-      extension: getExtension(leaf.data.name),
-      sourceNode: leaf
-    }));
+    const hiddenTopLevelCount = candidates.length - visibleNodes.length;
+    const topLevelAggregateCost = hiddenTopLevelCount > 0 ? 1 : 0;
+    let childBudget = Math.max(
+      0,
+      limit - visibleNodes.length - topLevelAggregateCost
+    );
+    const expandableNodes = visibleNodes.filter((node) => (
+      node.data.type === 'directory' && node.children?.length
+    ));
+    const expandableSize = expandableNodes.reduce(
+      (sum, node) => sum + Number(node.value || 0),
+      0
+    );
+    let remainingExpandableSize = expandableSize;
+    let remainingExpandableCount = expandableNodes.length;
+
+    const visible = visibleNodes.map((node) => {
+      let childLimit = 0;
+      if (node.data.type === 'directory' && node.children?.length && childBudget > 0) {
+        const proportionalShare = remainingExpandableSize > 0
+          ? Math.floor(childBudget * Number(node.value || 0) / remainingExpandableSize)
+          : Math.floor(childBudget / Math.max(1, remainingExpandableCount));
+        childLimit = Math.min(
+          childBudget,
+          TREEMAP.maximumChildrenPerContainer,
+          Math.max(2, proportionalShare)
+        );
+        childBudget -= childLimit;
+        remainingExpandableSize -= Number(node.value || 0);
+        remainingExpandableCount--;
+      }
+      return this.createItem(node, childLimit);
+    });
+
     let remainder = 0;
-    for (let index = visibleLeaves.length; index < files.length; index++) {
-      remainder += files[index].value;
+    let remainderFiles = 0;
+    for (let index = visibleNodes.length; index < candidates.length; index++) {
+      remainder += candidates[index].value;
+      remainderFiles += Number(candidates[index].data.itemCount || 1);
     }
     if (remainder > 0) {
-      const remainderCount = files.length - visibleLeaves.length;
-      visible.push({
-        name: `Other files (${formatCount(remainderCount)})`,
-        path: '__other__',
+      visible.push(this.createAggregateItem({
+        name: `Other items (${formatCount(hiddenTopLevelCount)})`,
+        path: `diskstatsx:aggregate:items:${scope.data.path}`,
         size: remainder,
-        extension: '<other>',
-        sourceNode: null,
-        fileCount: remainderCount
-      });
+        count: remainderFiles || hiddenTopLevelCount
+      }));
     }
     return visible;
   }
 
-  sortedLeaves(scope) {
-    if (!this.fileCache.has(scope)) {
-      const files = scope.leaves()
-        .filter((leaf) => leaf.data.type === 'file' && leaf.value > 0)
-        .sort((left, right) => right.value - left.value);
-      this.fileCache.set(scope, files);
+  createItem(node, childLimit = 0) {
+    const item = {
+      name: node.data.name,
+      path: node.data.path,
+      size: node.value,
+      type: node.data.type,
+      synthetic: Boolean(node.data.synthetic),
+      cloudOnly: Boolean(node.data.cloudOnly),
+      extension: this.itemCategory(node),
+      colorKey: node.data.type === 'directory'
+        ? `folder:${node.data.path}`
+        : this.itemCategory(node),
+      sourceNode: node,
+      fileCount: node.data.itemCount || 1
+    };
+    if (childLimit <= 0 || !node.children?.length) {
+      return item;
     }
-    return this.fileCache.get(scope);
+
+    const candidates = this.sortedItems(node);
+    const hasRemainder = candidates.length > childLimit;
+    const visibleCount = hasRemainder ? Math.max(0, childLimit - 1) : childLimit;
+    const visibleNodes = candidates.slice(0, visibleCount);
+    item.children = visibleNodes.map((child) => this.createItem(child));
+
+    if (hasRemainder) {
+      const hiddenNodes = candidates.slice(visibleCount);
+      item.children.push(this.createAggregateItem({
+        name: `Other items (${formatCount(hiddenNodes.length)})`,
+        path: `diskstatsx:aggregate:items:${node.data.path}`,
+        size: hiddenNodes.reduce((sum, child) => sum + Number(child.value || 0), 0),
+        count: hiddenNodes.reduce(
+          (sum, child) => sum + Number(child.data.itemCount || 1),
+          0
+        )
+      }));
+    }
+    return item;
+  }
+
+  createAggregateItem({ name, path, size, count }) {
+    return {
+      name,
+      path,
+      size,
+      type: 'aggregate',
+      synthetic: true,
+      cloudOnly: false,
+      extension: '<other>',
+      colorKey: '<other>',
+      sourceNode: null,
+      fileCount: count
+    };
+  }
+
+  serializeItem(item) {
+    const itemIndex = this.renderItems.length;
+    this.renderItems.push(item);
+    const serialized = {
+      itemIndex,
+      name: item.name,
+      path: item.path,
+      size: item.size,
+      extension: item.extension,
+      fileCount: item.fileCount || 1,
+      color: this.extensionColor(item.colorKey)
+    };
+    if (item.children?.length) {
+      serialized.children = item.children.map((child) => this.serializeItem(child));
+    }
+    return serialized;
+  }
+
+  sortedItems(scope) {
+    if (!this.itemCache.has(scope)) {
+      const items = (scope.children || [])
+        .filter((node) => node.value > 0)
+        .sort((left, right) => right.value - left.value);
+      this.itemCache.set(scope, items);
+    }
+    return this.itemCache.get(scope);
+  }
+
+  itemCategory(node) {
+    if (node.data.type === 'directory') {
+      return '<folder>';
+    }
+    if (node.data.type === 'aggregate') {
+      return '<other>';
+    }
+    return getExtension(node.data.name);
   }
 
   initializeWorker() {
@@ -276,7 +395,9 @@ export class TreemapView {
 
     overlay.addEventListener('click', (event) => {
       const tile = this.findTile(event.clientX, event.clientY);
-      if (tile) {
+      if (tile?.item.type === 'directory') {
+        this.onAnalyze(tile.item.sourceNode);
+      } else if (tile && !tile.item.synthetic) {
         this.onSelect(tile.item.path);
       }
     });
@@ -284,14 +405,14 @@ export class TreemapView {
     overlay.addEventListener('contextmenu', (event) => {
       event.preventDefault();
       const tile = this.findTile(event.clientX, event.clientY);
-      if (!tile || tile.item.path === '__other__') {
+      if (!tile || tile.item.synthetic) {
         return;
       }
       this.onSelect(tile.item.path);
       this.onContextMenu(event, {
         name: tile.item.name,
         path: tile.item.path,
-        type: 'file',
+        type: tile.item.type,
         node: tile.item.sourceNode
       });
     });

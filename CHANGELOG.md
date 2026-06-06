@@ -26,6 +26,11 @@ All notable changes are documented in this file.
 - Security hardened with CSP, denied renderer permissions and loopback-only serving
 - In-app toolbar icon updated to match the packaged application
 - Native macOS traffic-light controls integrated into the application toolbar
+- Persistent rotating diagnostics and renderer crash recovery
+- Native SQLite index and lazy folder-by-folder visualization prevent renderer memory crashes on root scans
+- Two-level lazy visualization windows for hierarchical Sunburst and Treemap rendering
+- Dataless iCloud placeholders are indexed but excluded from allocated disk totals
+- Largest Files groups Top 10 overall with Top 3 plus `Other files` for each first-level folder
 
 ### Security
 

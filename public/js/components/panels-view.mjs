@@ -19,15 +19,15 @@ export class PanelsView {
     this.onSelect = onSelect;
     this.onContextMenu = onContextMenu;
     this.onHighlightExtension = onHighlightExtension;
-    this.topFiles = [];
+    this.largestFilesSummary = null;
     this.selectedPath = null;
     this.fileSort = { key: 'size', direction: -1 };
     this.extensionColor = extensionColor;
     this.bind();
   }
 
-  setTopFiles(files) {
-    this.topFiles = files;
+  setLargestFiles(summary) {
+    this.largestFilesSummary = summary;
     this.renderLargestFiles();
   }
 
@@ -44,7 +44,7 @@ export class PanelsView {
   }
 
   clear() {
-    this.topFiles = [];
+    this.largestFilesSummary = null;
     this.elements.largestFolders.replaceChildren();
     this.elements.largestFiles.replaceChildren();
     this.elements.extensionTable.replaceChildren();
@@ -89,35 +89,85 @@ export class PanelsView {
   }
 
   renderLargestFiles() {
-    const rows = [...this.topFiles].sort((left, right) => {
+    const fragment = document.createDocumentFragment();
+    const summary = this.largestFilesSummary;
+
+    if (!summary?.global?.length && !summary?.firstLevel?.length) {
+      fragment.appendChild(this.createFileGroupRow('No files', 'No allocated files found'));
+      this.elements.largestFiles.replaceChildren(fragment);
+      return;
+    }
+
+    if (summary.global?.length) {
+      fragment.appendChild(this.createFileGroupRow(
+        'Top 10 overall',
+        'Largest allocated files in the complete scan'
+      ));
+      for (const file of this.sortedFiles(summary.global)) {
+        fragment.appendChild(this.createFileRow(file));
+      }
+    }
+
+    for (const group of summary.firstLevel || []) {
+      fragment.appendChild(this.createFileGroupRow(group.name, group.path));
+      for (const file of this.sortedFiles(group.files || [])) {
+        fragment.appendChild(this.createFileRow(file));
+      }
+      if (group.other) {
+        fragment.appendChild(this.createFileRow(group.other, {
+          displayPath: `${group.other.itemCount} remaining ${
+            group.other.itemCount === 1 ? 'file' : 'files'
+          }`
+        }));
+      }
+    }
+    this.elements.largestFiles.replaceChildren(fragment);
+  }
+
+  sortedFiles(files) {
+    return [...files].sort((left, right) => {
       const { key, direction } = this.fileSort;
       if (key === 'size') {
         return (Number(left.size || 0) - Number(right.size || 0)) * direction;
       }
       return String(left[key] || '').localeCompare(String(right[key] || '')) * direction;
     });
-    const fragment = document.createDocumentFragment();
+  }
 
-    for (const file of rows) {
-      const row = document.createElement('tr');
-      row.innerHTML = `
-        <td class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</td>
-        <td>${formatSize(file.size)}</td>
-        <td class="file-path" title="${escapeHtml(file.path)}">${escapeHtml(file.path)}</td>
-      `;
-      row.addEventListener('click', () => this.onSelect(file.path));
-      row.addEventListener('contextmenu', (event) => {
-        event.preventDefault();
-        this.onContextMenu(event, {
-          name: file.name,
-          path: file.path,
-          type: 'file',
-          node: null
-        });
-      });
-      fragment.appendChild(row);
+  createFileGroupRow(name, path) {
+    const row = document.createElement('tr');
+    row.className = 'file-group-row';
+    row.innerHTML = `
+      <td colspan="3">
+        <span class="file-group-name">${escapeHtml(name)}</span>
+        <span class="file-group-path" title="${escapeHtml(path)}">${escapeHtml(path)}</span>
+      </td>
+    `;
+    return row;
+  }
+
+  createFileRow(file, { displayPath = file.path } = {}) {
+    const row = document.createElement('tr');
+    row.classList.toggle('aggregate-row', Boolean(file.synthetic));
+    row.innerHTML = `
+      <td class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</td>
+      <td>${formatSize(file.size)}</td>
+      <td class="file-path" title="${escapeHtml(displayPath)}">${escapeHtml(displayPath)}</td>
+    `;
+    if (file.synthetic) {
+      return row;
     }
-    this.elements.largestFiles.replaceChildren(fragment);
+    row.addEventListener('click', () => this.onSelect(file.path));
+    row.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      this.onContextMenu(event, {
+        name: file.name,
+        path: file.path,
+        type: 'file',
+        node: null
+      });
+    });
+    return row;
   }
 
   renderExtensions(node) {

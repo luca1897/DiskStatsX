@@ -8,7 +8,7 @@ const { ScanManager } = require('./server/scan-manager');
 const PORT = Number(process.env.PORT || 3000);
 const scannerPath = process.env.DISKSTATSX_SCANNER_PATH || path.join(__dirname, 'scanner');
 const resultPath = process.env.DISKSTATSX_RESULT_PATH ||
-  path.join(os.tmpdir(), 'diskstatsx-scan-result.json');
+  path.join(os.tmpdir(), 'diskstatsx-scan-index.sqlite');
 
 const scanManager = new ScanManager({ scannerPath, resultPath });
 const app = createApp({

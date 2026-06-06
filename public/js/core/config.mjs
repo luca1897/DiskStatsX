@@ -30,7 +30,10 @@ export const COLORS = {
 export const TREEMAP = {
   minTiles: 240,
   maxTiles: 1000,
-  pixelsPerTile: 700
+  pixelsPerTile: 700,
+  topLevelShare: 0.35,
+  minimumTopLevelItems: 48,
+  maximumChildrenPerContainer: 96
 };
 
 export const TREE_VIEW = {

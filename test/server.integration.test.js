@@ -14,11 +14,12 @@ const projectRoot = path.resolve(__dirname, '..');
 
 test('API scans a directory with native cache exclusions', async (context) => {
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'diskstatsx-test-'));
-  const resultPath = path.join(temporaryDirectory, 'result.json');
+  const resultPath = path.join(temporaryDirectory, 'result.sqlite');
   const fixturePath = path.join(temporaryDirectory, 'fixture');
-  await fs.mkdir(path.join(fixturePath, 'keep'), { recursive: true });
+  await fs.mkdir(path.join(fixturePath, 'keep', 'nested'), { recursive: true });
   await fs.mkdir(path.join(fixturePath, 'Caches'), { recursive: true });
   await fs.writeFile(path.join(fixturePath, 'keep', 'visible.bin'), Buffer.alloc(4096));
+  await fs.writeFile(path.join(fixturePath, 'keep', 'nested', 'deep.bin'), Buffer.alloc(2048));
   await fs.writeFile(path.join(fixturePath, 'Caches', 'hidden.bin'), Buffer.alloc(8192));
 
   const manager = new ScanManager({
@@ -62,15 +63,36 @@ test('API scans a directory with native cache exclusions', async (context) => {
     headers: { Cookie: sessionCookie }
   });
   assert.equal(resultResponse.status, 200);
+  assert.ok(manager.snapshot.resultBytes > 0);
   const tree = await resultResponse.json();
   assert.deepEqual(tree.children.map((child) => child.name), ['keep']);
+  assert.equal(tree.lazy, true);
+  assert.equal(tree.fileCount, 2);
+  assert.equal(tree.children[0].fileCount, 2);
+  assert.deepEqual(
+    tree.children[0].children.map((entry) => entry.name),
+    ['nested', 'visible.bin']
+  );
+
+  const childResponse = await fetch(
+    `${baseUrl}/result?path=${encodeURIComponent(path.join(fixturePath, 'keep'))}`,
+    { headers: { Cookie: sessionCookie } }
+  );
+  assert.equal(childResponse.status, 200);
+  const child = await childResponse.json();
+  assert.equal(child.parentPath, fixturePath);
+  assert.deepEqual(child.children.map((entry) => entry.name), ['nested', 'visible.bin']);
+  assert.deepEqual(
+    child.breadcrumbs.map((entry) => entry.name),
+    ['fixture', 'keep']
+  );
 });
 
 test('local service rejects foreign hosts, origins and unauthenticated API requests', async (context) => {
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'diskstatsx-security-'));
   const manager = new ScanManager({
     scannerPath: path.join(projectRoot, 'scanner'),
-    resultPath: path.join(temporaryDirectory, 'result.json')
+    resultPath: path.join(temporaryDirectory, 'result.sqlite')
   });
   const app = createApp({
     scanManager: manager,
@@ -121,7 +143,7 @@ test('local service rejects foreign hosts, origins and unauthenticated API reque
 
 test('ScanManager cancels a running native process and removes partial output', async (context) => {
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'diskstatsx-cancel-'));
-  const resultPath = path.join(temporaryDirectory, 'result.json');
+  const resultPath = path.join(temporaryDirectory, 'result.sqlite');
   const scannerPath = path.join(temporaryDirectory, 'slow-scanner');
   await fs.writeFile(scannerPath, `#!/bin/sh
 trap 'exit 143' TERM

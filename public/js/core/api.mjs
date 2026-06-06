@@ -26,12 +26,10 @@ export class ApiClient {
     return parseResponse(response);
   }
 
-  async getResult() {
-    const response = await fetch('/result');
-    if (!response.ok) {
-      return null;
-    }
-    return response.json();
+  async getResult(path) {
+    const query = path ? `?path=${encodeURIComponent(path)}` : '';
+    const response = await fetch(`/result${query}`);
+    return parseResponse(response);
   }
 
   async runSystemAction(action, path) {

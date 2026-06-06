@@ -3,7 +3,7 @@ import { createColorScales } from './core/colors.mjs';
 import { createDomReferences } from './core/dom.mjs';
 import {
   buildHierarchy,
-  collectLargestFiles
+  collectLargestFilesSummary
 } from './core/hierarchy.mjs';
 import { AppStore } from './core/store.mjs';
 import { createDemoTree } from './demo-data.mjs';
@@ -32,19 +32,24 @@ class DiskStatsApp {
     this.statusView = new StatusView(this.elements);
     this.eventSource = null;
     this.elapsedTimer = null;
+    this.resultLoadPromise = null;
+    this.resultLoadPath = null;
+    this.resultRequestId = 0;
+    this.largestFilesSummary = null;
     this.demoMode = new URLSearchParams(window.location.search).has('demo');
 
     this.contextMenu = new ContextMenu({
       element: this.elements.contextMenu,
       api: this.api,
       getRoot: () => this.store.state.root,
-      onAnalyze: (node) => this.setAnalysisNode(node),
+      onAnalyze: (node) => this.navigateToDirectory(node),
       onRescan: (path) => this.startScan(path),
       onMessage: (message) => this.setToolbarMessage(message)
     });
 
     const commonCallbacks = {
-      onAnalyze: (node) => this.setAnalysisNode(node),
+      onAnalyze: (node) => this.navigateToDirectory(node),
+      onNavigatePath: (path) => this.fetchResult(path),
       onSelect: (path) => this.setSelectedPath(path),
       onContextMenu: (event, target) => this.contextMenu.show(event, target)
     };
@@ -172,7 +177,8 @@ class DiskStatsApp {
       snapshot: (payload) => {
         this.updateStatus(payload);
         if (payload.resultReady) {
-          this.fetchResult();
+          this.elements.pathInput.value = payload.rootPath;
+          this.fetchResult(payload.rootPath);
         }
       },
       started: (payload) => this.updateStatus(payload),
@@ -187,7 +193,8 @@ class DiskStatsApp {
       },
       done: (payload) => {
         this.updateStatus(payload);
-        this.fetchResult();
+        this.elements.pathInput.value = payload.rootPath;
+        this.fetchResult(payload.rootPath);
       },
       'scan-error': (payload) => this.handleScanError(payload),
       'connection-error': () => {
@@ -199,6 +206,10 @@ class DiskStatsApp {
   }
 
   async startScan(path) {
+    this.resultRequestId++;
+    this.resultLoadPromise = null;
+    this.resultLoadPath = null;
+    this.largestFilesSummary = null;
     this.store.resetForScan(path);
     this.clearViews();
     this.showEmptyState(
@@ -217,22 +228,53 @@ class DiskStatsApp {
     await this.api.cancelScan();
   }
 
-  async fetchResult() {
-    const data = await this.api.getResult();
-    if (data) {
-      this.loadTree(data);
+  async fetchResult(path = this.store.state.status.rootPath) {
+    if (!path) {
+      return;
+    }
+    if (this.resultLoadPromise && this.resultLoadPath === path) {
+      return this.resultLoadPromise;
+    }
+    const requestId = ++this.resultRequestId;
+    this.resultLoadPath = path;
+    this.setToolbarMessage(`Loading ${path}`);
+    this.resultLoadPromise = this.loadResult(path, requestId)
+      .finally(() => {
+        if (requestId === this.resultRequestId) {
+          this.resultLoadPromise = null;
+          this.resultLoadPath = null;
+        }
+      });
+    return this.resultLoadPromise;
+  }
+
+  async loadResult(path, requestId) {
+    try {
+      const data = await this.api.getResult(path);
+      if (data && requestId === this.resultRequestId) {
+        this.loadTree(data);
+      }
+    } catch (error) {
+      if (requestId !== this.resultRequestId) {
+        return;
+      }
+      this.setToolbarMessage(error.message || 'Could not load the directory');
     }
   }
 
   loadTree(data) {
     const root = buildHierarchy(data);
-    const topFiles = collectLargestFiles(data, 100);
+    if (data.largestFiles) {
+      this.largestFilesSummary = data.largestFiles;
+    } else if (!data.lazy) {
+      this.largestFilesSummary = collectLargestFilesSummary(data);
+    }
     this.store.update({
       treeData: data,
       root,
       analysisNode: root,
       selectedPath: root.data.path,
-      topFiles
+      largestFilesSummary: this.largestFilesSummary
     });
 
     this.elements.emptyState.classList.add('hidden');
@@ -240,19 +282,28 @@ class DiskStatsApp {
     this.treeView.setRoot(root);
     this.treemapView.setRoot(root);
     this.sunburstView.setRoot(root);
-    this.panelsView.setTopFiles(topFiles);
-    this.setAnalysisNode(root, { animateSunburst: false });
-    this.updateStatus({
-      state: 'done',
-      bytesDiscovered: data.size || root.value
-    });
+    this.panelsView.setLargestFiles(this.largestFilesSummary);
+    this.applyAnalysisNode(root, { animateSunburst: false });
     this.setView(this.store.state.view);
+    this.setToolbarMessage(data.path);
   }
 
-  setAnalysisNode(node, { animateSunburst = true } = {}) {
+  navigateToDirectory(node) {
     if (!node || node.data.type !== 'directory') {
       return;
     }
+    if (
+      !this.demoMode &&
+      this.store.state.root?.data.lazy &&
+      node.data.path !== this.store.state.root.data.path
+    ) {
+      this.fetchResult(node.data.path);
+      return;
+    }
+    this.applyAnalysisNode(node);
+  }
+
+  applyAnalysisNode(node, { animateSunburst = true } = {}) {
     this.store.update({ analysisNode: node });
     this.treeView.setAnalysisNode(node);
     this.treemapView.setScope(node);

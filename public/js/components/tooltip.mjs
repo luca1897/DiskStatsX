@@ -9,9 +9,13 @@ export class Tooltip {
   showNode(event, node, rootValue) {
     const value = Number(node.value || 0);
     const percent = rootValue ? (value / rootValue) * 100 : 0;
+    const storageNote = node.data.cloudOnly
+      ? '<div class="muted">iCloud placeholder · no local data allocated</div>'
+      : '';
     this.#setContent(node.data.path, `
       <strong>${escapeHtml(node.data.name || node.data.path)}</strong>
       <div>${formatSize(value)} · ${percent.toFixed(percent >= 1 ? 1 : 2)}%</div>
+      ${storageNote}
       <div class="muted">${escapeHtml(node.data.path || '')}</div>
     `);
     this.#position(event);
@@ -19,10 +23,14 @@ export class Tooltip {
 
   showTreemapItem(event, item, total) {
     const percent = total ? (Number(item.size || 0) / total) * 100 : 0;
-    const path = item.path === '__other__' ? 'Aggregated remaining files' : item.path;
+    const path = item.synthetic ? 'Aggregated remaining items' : item.path;
+    const storageNote = item.cloudOnly
+      ? '<div class="muted">iCloud placeholder · no local data allocated</div>'
+      : '';
     this.#setContent(`${item.path}:${item.size}`, `
       <strong>${escapeHtml(item.name)}</strong>
       <div>${formatSize(item.size)} · ${percent.toFixed(percent >= 1 ? 1 : 2)}%</div>
+      ${storageNote}
       <div class="muted">${escapeHtml(path)}</div>
       <div class="muted">${escapeHtml(item.extension)} · ${escapeHtml(extensionDescription(item.extension))}</div>
     `);

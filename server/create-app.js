@@ -59,7 +59,7 @@ function createApp({ scanManager, defaultScanPath = '/', publicPath, vendorPath 
     events.attach(request, response, scanManager.snapshot);
   });
 
-  app.get('/result', requireSession(sessionToken), (_request, response) => {
+  app.get('/result', requireSession(sessionToken), async (request, response, next) => {
     if (!scanManager.canServeResult) {
       const running = scanManager.isRunning;
       response.status(running ? 202 : 404).json({
@@ -67,8 +67,14 @@ function createApp({ scanManager, defaultScanPath = '/', publicPath, vendorPath 
       });
       return;
     }
-    response.type('application/json');
-    response.sendFile(scanManager.resultPath);
+    try {
+      const requestedPath = typeof request.query.path === 'string'
+        ? request.query.path
+        : scanManager.snapshot.rootPath;
+      response.json(await scanManager.readDirectory(requestedPath));
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.post('/system-action', requireSession(sessionToken), (request, response) => {

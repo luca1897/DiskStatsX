@@ -22,7 +22,8 @@ const EXTENSION_DESCRIPTIONS = {
   '.c': 'C Source',
   '.h': 'C Header',
   '<none>': 'No Extension',
-  '<other>': 'Aggregated Files'
+  '<other>': 'Aggregated Items',
+  '<folder>': 'Folder'
 };
 
 export function formatSize(bytes) {

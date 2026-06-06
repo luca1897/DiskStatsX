@@ -9,6 +9,7 @@ export class SunburstView {
     colorScale,
     tooltip,
     onAnalyze,
+    onNavigatePath,
     onSelect,
     onContextMenu
   }) {
@@ -16,6 +17,7 @@ export class SunburstView {
     this.colorScale = colorScale;
     this.tooltip = tooltip;
     this.onAnalyze = onAnalyze;
+    this.onNavigatePath = onNavigatePath;
     this.onSelect = onSelect;
     this.onContextMenu = onContextMenu;
     this.root = null;
@@ -37,6 +39,7 @@ export class SunburstView {
   setRoot(root) {
     this.root = root;
     this.focusNode = root;
+    this.elements.sunburstRings.disabled = Boolean(root.data.lazy);
     this.elements.emptyState.classList.add('hidden');
     this.initializeSvg();
     this.resizeObserver.observe(this.elements.chart);
@@ -65,6 +68,7 @@ export class SunburstView {
     this.elements.chart.replaceChildren();
     this.elements.breadcrumb.replaceChildren();
     this.elements.sunburstSegmentCount.textContent = '0 segments';
+    this.elements.sunburstRings.disabled = false;
     this.svg = null;
   }
 
@@ -86,6 +90,8 @@ export class SunburstView {
       .on('click', () => {
         if (this.focusNode?.parent) {
           this.onAnalyze(this.focusNode.parent);
+        } else if (this.focusNode?.data.parentPath) {
+          this.onNavigatePath(this.focusNode.data.parentPath);
         }
       });
     this.centerLayer.append('text').attr('class', 'center-back').text('↑');
@@ -163,9 +169,10 @@ export class SunburstView {
   }
 
   renderGuides() {
-    const ringWidth = (this.radius - this.centerRadius) / this.rings;
+    const ringCount = this.visibleRingCount();
+    const ringWidth = (this.radius - this.centerRadius) / ringCount;
     this.guideLayer.selectAll('circle')
-      .data(d3.range(1, this.rings + 1))
+      .data(d3.range(1, ringCount + 1))
       .join('circle')
       .attr('r', (ring) => this.centerRadius + ring * ringWidth)
       .attr('class', 'sunburst-guide');
@@ -187,13 +194,16 @@ export class SunburstView {
         event.stopPropagation();
         if (node.data.type === 'directory') {
           this.onAnalyze(node);
-        } else {
+        } else if (!node.data.synthetic) {
           this.onSelect(node.data.path);
         }
       })
       .on('contextmenu', (event, node) => {
         event.preventDefault();
         event.stopPropagation();
+        if (node.data.synthetic) {
+          return;
+        }
         this.onContextMenu(event, {
           name: node.data.name,
           path: node.data.path,
@@ -281,7 +291,7 @@ export class SunburstView {
     this.centerLayer.select('.center-disc').attr('r', this.centerRadius - 5);
     this.centerLayer.select('.center-back')
       .attr('y', -36)
-      .classed('visible', Boolean(node.parent));
+      .classed('visible', Boolean(node.parent || node.data.parentPath));
     this.centerLayer.select('.center-label')
       .attr('y', -9)
       .text(shortName);
@@ -297,30 +307,48 @@ export class SunburstView {
     if (!this.focusNode) {
       return;
     }
+    if (this.focusNode === this.root && this.root.data.breadcrumbs?.length) {
+      const fragment = document.createDocumentFragment();
+      for (const part of this.root.data.breadcrumbs) {
+        fragment.appendChild(this.createBreadcrumbButton(part, null));
+      }
+      this.elements.breadcrumb.replaceChildren(fragment);
+      return;
+    }
     const fragment = document.createDocumentFragment();
     for (const part of this.focusNode.ancestors().reverse()) {
-      const button = document.createElement('button');
-      button.className = 'crumb';
-      button.type = 'button';
-      button.textContent = part.data.name || part.data.path || '/';
-      button.title = part.data.path || '';
-      button.addEventListener('click', () => this.onAnalyze(part));
-      button.addEventListener('contextmenu', (event) => {
-        event.preventDefault();
-        this.onContextMenu(event, {
-          name: part.data.name,
-          path: part.data.path,
-          type: 'directory',
-          node: part
-        });
-      });
-      fragment.appendChild(button);
+      fragment.appendChild(this.createBreadcrumbButton(part.data, part));
     }
     this.elements.breadcrumb.replaceChildren(fragment);
   }
 
+  createBreadcrumbButton(data, node) {
+    const button = document.createElement('button');
+    button.className = 'crumb';
+    button.type = 'button';
+    button.textContent = data.name || data.path || '/';
+    button.title = data.path || '';
+    button.addEventListener('click', () => {
+      if (node) {
+        this.onAnalyze(node);
+      } else {
+        this.onNavigatePath(data.path);
+      }
+    });
+    button.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      this.onContextMenu(event, {
+        name: data.name,
+        path: data.path,
+        type: 'directory',
+        node
+      });
+    });
+    return button;
+  }
+
   arcPath(position) {
-    const ringWidth = (this.radius - this.centerRadius) / this.rings;
+    const ringWidth = (this.radius - this.centerRadius) / this.visibleRingCount();
     return d3.arc()
       .startAngle(position.x0)
       .endAngle(position.x1)
@@ -351,7 +379,7 @@ export class SunburstView {
 
   labelText(node) {
     const target = node.sunburstTarget;
-    const ringWidth = (this.radius - this.centerRadius) / this.rings;
+    const ringWidth = (this.radius - this.centerRadius) / this.visibleRingCount();
     const labelRadius = this.centerRadius + (target.depth - 0.5) * ringWidth;
     const available = Math.max(5, Math.floor((target.x1 - target.x0) * labelRadius / 6.2));
     const name = node.data.name || '';
@@ -360,7 +388,7 @@ export class SunburstView {
 
   labelTransform(position) {
     const angle = (position.x0 + position.x1) / 2;
-    const ringWidth = (this.radius - this.centerRadius) / this.rings;
+    const ringWidth = (this.radius - this.centerRadius) / this.visibleRingCount();
     const labelRadius = this.centerRadius + (position.depth - 0.5) * ringWidth;
     const rotation = angle * 180 / Math.PI - 90;
     const flip = angle >= Math.PI ? 180 : 0;
@@ -370,6 +398,10 @@ export class SunburstView {
   restoreRings() {
     const saved = Number(localStorage.getItem(STORAGE_KEYS.sunburstRings));
     return [4, 6, 8].includes(saved) ? saved : SUNBURST.defaultRings;
+  }
+
+  visibleRingCount() {
+    return Math.max(1, Math.min(this.rings, this.focusNode?.height || 1));
   }
 
   bindControls() {

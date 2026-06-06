@@ -152,7 +152,8 @@ export class TreeView {
   createRow(node, index) {
     const percent = this.root.value ? (node.value / this.root.value) * 100 : 0;
     const parentPercent = node.parent?.value ? (node.value / node.parent.value) * 100 : 100;
-    const hasChildren = this.sortedDirectoryChildren(node).length > 0;
+    const loadedChildren = this.sortedDirectoryChildren(node);
+    const hasChildren = loadedChildren.length > 0 || node.data.hasChildren;
     const expanded = this.expandedPaths.has(node.data.path);
     const row = document.createElement('tr');
     row.dataset.path = node.data.path;
@@ -227,7 +228,12 @@ export class TreeView {
       }
       if (event.target.closest('.tree-toggle')) {
         event.stopPropagation();
-        if (!this.sortedDirectoryChildren(node).length) {
+        const loadedChildren = this.sortedDirectoryChildren(node);
+        if (!loadedChildren.length && node.data.hasChildren) {
+          this.onAnalyze(node);
+          return;
+        }
+        if (!loadedChildren.length) {
           return;
         }
         if (this.expandedPaths.has(node.data.path)) {

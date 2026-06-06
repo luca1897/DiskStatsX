@@ -5,6 +5,8 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
+const MAX_QUERY_OUTPUT_BYTES = 32 * 1024 * 1024;
+
 const INITIAL_STATUS = {
   state: 'idle',
   currentPath: '',
@@ -25,6 +27,7 @@ class ScanManager extends EventEmitter {
     this.finishedAt = null;
     this.stderrBuffer = '';
     this.resultReady = false;
+    this.resultBytes = 0;
     this.cancelRequested = false;
     this.status = { ...INITIAL_STATUS };
     this.heartbeat = setInterval(() => {
@@ -43,7 +46,8 @@ class ScanManager extends EventEmitter {
     return {
       ...this.status,
       elapsedMs: this.elapsedMs(),
-      resultReady: this.resultReady
+      resultReady: this.resultReady,
+      resultBytes: this.resultBytes
     };
   }
 
@@ -63,22 +67,13 @@ class ScanManager extends EventEmitter {
     }
 
     this.reset(rootPath, filters);
-    const resultStream = fs.createWriteStream(this.resultPath, { flags: 'w' });
-    let outputFailed = false;
     const scannerArgs = this.scannerArguments(rootPath, filters);
 
     this.process = spawn(this.scannerPath, scannerArgs, {
       cwd: path.dirname(this.scannerPath),
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'ignore', 'pipe']
     });
     const child = this.process;
-    child.stdout.pipe(resultStream, { end: false });
-
-    resultStream.on('error', (error) => {
-      outputFailed = true;
-      child.kill('SIGTERM');
-      this.publish('scan-error', { state: 'error', error: error.message });
-    });
 
     child.stderr.on('data', (chunk) => this.consumeProgress(chunk.toString('utf8')));
     child.on('error', (error) => {
@@ -89,7 +84,7 @@ class ScanManager extends EventEmitter {
       this.publish('scan-error', { state: 'error', error: error.message });
     });
     child.on('close', (code, signal) => {
-      this.handleClose({ child, resultStream, outputFailed, code, signal });
+      this.handleClose({ child, code, signal });
     });
 
     this.publish('started');
@@ -127,7 +122,7 @@ class ScanManager extends EventEmitter {
   }
 
   scannerArguments(rootPath, filters) {
-    const args = [rootPath];
+    const args = [rootPath, '--database', this.resultPath];
     if (filters.caches) {
       args.push('--skip-caches');
     }
@@ -142,10 +137,13 @@ class ScanManager extends EventEmitter {
 
   reset(rootPath, filters) {
     fs.rmSync(this.resultPath, { force: true });
+    fs.rmSync(`${this.resultPath}-shm`, { force: true });
+    fs.rmSync(`${this.resultPath}-wal`, { force: true });
     this.startedAt = Date.now();
     this.finishedAt = null;
     this.stderrBuffer = '';
     this.resultReady = false;
+    this.resultBytes = 0;
     this.cancelRequested = false;
     this.status = {
       ...INITIAL_STATUS,
@@ -169,7 +167,7 @@ class ScanManager extends EventEmitter {
       ...patch,
       elapsedMs: this.elapsedMs()
     };
-    this.emit('status', event, this.status);
+    this.emit('status', event, this.snapshot);
   }
 
   consumeProgress(chunk) {
@@ -205,7 +203,7 @@ class ScanManager extends EventEmitter {
     });
   }
 
-  handleClose({ child, resultStream, outputFailed, code, signal }) {
+  handleClose({ child, code, signal }) {
     const wasCanceled = this.cancelRequested;
     this.cancelRequested = false;
     this.finishedAt = Date.now();
@@ -217,25 +215,81 @@ class ScanManager extends EventEmitter {
       this.stderrBuffer = '';
     }
 
-    resultStream.end(() => {
-      if (outputFailed) {
+    if (wasCanceled) {
+      this.resultReady = false;
+      this.resultBytes = 0;
+      fs.rmSync(this.resultPath, { force: true });
+      this.publish('canceled', { state: 'canceled', error: null });
+    } else if (code === 0) {
+      try {
+        this.resultBytes = fs.statSync(this.resultPath).size;
+      } catch (error) {
+        this.resultReady = false;
+        this.publish('scan-error', {
+          state: 'error',
+          error: `could not finalize scan index: ${error.message}`
+        });
         return;
       }
-      if (wasCanceled) {
-        this.resultReady = false;
-        fs.rmSync(this.resultPath, { force: true });
-        this.publish('canceled', { state: 'canceled', error: null });
-      } else if (code === 0) {
-        this.resultReady = true;
-        this.publish('done', { state: 'done', error: null });
-      } else {
-        this.resultReady = false;
-        fs.rmSync(this.resultPath, { force: true });
-        const error = signal
-          ? `scanner terminated by ${signal}`
-          : `scanner exited with code ${code}`;
-        this.publish('scan-error', { state: 'error', error });
-      }
+      this.resultReady = true;
+      this.publish('done', { state: 'done', error: null });
+    } else {
+      this.resultReady = false;
+      this.resultBytes = 0;
+      fs.rmSync(this.resultPath, { force: true });
+      const error = signal
+        ? `scanner terminated by ${signal}`
+        : `scanner exited with code ${code}`;
+      this.publish('scan-error', { state: 'error', error });
+    }
+  }
+
+  readDirectory(requestedPath) {
+    if (!this.canServeResult) {
+      throw createHttpError(this.isRunning ? 202 : 404, 'no scan result available');
+    }
+    const targetPath = requestedPath || this.status.rootPath;
+    return new Promise((resolve, reject) => {
+      const query = spawn(this.scannerPath, ['--query', this.resultPath, targetPath], {
+        cwd: path.dirname(this.scannerPath),
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      const output = [];
+      const errors = [];
+      let outputBytes = 0;
+      let rejected = false;
+
+      query.stdout.on('data', (chunk) => {
+        outputBytes += chunk.length;
+        if (outputBytes > MAX_QUERY_OUTPUT_BYTES) {
+          rejected = true;
+          query.kill('SIGTERM');
+          reject(createHttpError(413, 'directory view is too large'));
+          return;
+        }
+        output.push(chunk);
+      });
+      query.stderr.on('data', (chunk) => errors.push(chunk));
+      query.on('error', (error) => {
+        if (!rejected) {
+          reject(error);
+        }
+      });
+      query.on('close', (code) => {
+        if (rejected) {
+          return;
+        }
+        if (code !== 0) {
+          const message = Buffer.concat(errors).toString('utf8').trim();
+          reject(createHttpError(404, message || 'directory is not available'));
+          return;
+        }
+        try {
+          resolve(JSON.parse(Buffer.concat(output).toString('utf8')));
+        } catch {
+          reject(createHttpError(500, 'scanner returned an invalid directory view'));
+        }
+      });
     });
   }
 }

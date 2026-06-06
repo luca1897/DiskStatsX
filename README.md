@@ -6,24 +6,30 @@
 
 DiskStatsX is a native macOS disk space analyzer focused on fast metadata enumeration and clear, interactive visualization.
 
-The scanner is written in C and enumerates directories with Apple's `getattrlistbulk()` API. Results are streamed through a local Node.js service and rendered as an interactive Treemap or Sunburst inside an Electron desktop app.
+The scanner is written in C and enumerates directories with Apple's `getattrlistbulk()` API, without a `readdir()`/`stat()` fallback scanner. Results are indexed in SQLite by the native process, queried through the local Node.js service, and rendered as an interactive Treemap or Sunburst inside the Electron desktop app.
 
 ## Highlights
 
 - Native macOS scanner using `open()` and `getattrlistbulk()`
+- SQLite scan index with lazy, two-level folder windows
 - Recursive hierarchy with aggregated allocated sizes
+- iCloud-only/dataless placeholders contribute `0 B` to local disk usage
 - Live progress over Server-Sent Events
 - Cancelable scans
 - Native macOS folder picker alongside manual path entry
 - Integrated native macOS traffic-light window controls
 - Cache, external-volume and system-folder exclusions
 - Virtualized directory tree for very large scans
-- OffscreenCanvas Treemap rendered in a Web Worker
-- Budgeted D3 Sunburst with zoom, ring controls and file filtering
+- Bounded two-level Treemap and Sunburst payloads regardless of total scan size
+- Largest-files summary with Top 10 overall and Top 3 plus `Other files` per first-level folder
+- Hierarchical OffscreenCanvas Treemap rendered in a Web Worker
+- Budgeted D3 Sunburst with two-level lazy views, zoom, ring controls and file filtering
 - Finder integration and contextual file actions
 - Apple Silicon desktop packaging
 
 ## Screenshots
+
+The screenshots use the built-in anonymized demo dataset and contain no local paths or scanned filesystem metadata.
 
 ### Treemap
 
@@ -92,16 +98,32 @@ macOS privacy controls can restrict folders such as Mail, Messages and parts of 
 
 The scanner skips permission errors and symbolic links.
 
+## Diagnostics
+
+The desktop application writes a rotating diagnostic log to:
+
+```text
+~/Library/Logs/DiskStatsX/diskstatsx.log
+```
+
+Native renderer crash reports are stored by macOS in:
+
+```text
+~/Library/Logs/DiagnosticReports/
+```
+
+The application records scan lifecycle events, renderer failures and JavaScript errors. Logs can include the selected scan root, so review them before sharing publicly.
+
 ## Architecture
 
 ```text
 getattrlistbulk() native scanner
               |
               v
-       JSON filesystem tree
+       SQLite scan index
               |
               v
-  ScanManager + Express + SSE
+ bounded directory JSON + SSE
               |
               v
  Electron / browser ES modules
