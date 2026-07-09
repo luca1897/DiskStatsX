@@ -12,13 +12,17 @@ export class PanelsView {
     onAnalyze,
     onSelect,
     onContextMenu,
-    onHighlightExtension
+    onHighlightExtension,
+    onToggleReview,
+    isReviewed
   }) {
     this.elements = elements;
     this.onAnalyze = onAnalyze;
     this.onSelect = onSelect;
     this.onContextMenu = onContextMenu;
     this.onHighlightExtension = onHighlightExtension;
+    this.onToggleReview = onToggleReview;
+    this.isReviewed = isReviewed;
     this.largestFilesSummary = null;
     this.selectedPath = null;
     this.fileSort = { key: 'size', direction: -1 };
@@ -150,13 +154,27 @@ export class PanelsView {
     const row = document.createElement('tr');
     row.classList.toggle('aggregate-row', Boolean(file.synthetic));
     row.innerHTML = `
-      <td class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</td>
+      <td class="file-name" title="${escapeHtml(file.name)}">
+        <label class="review-check">
+          <input type="checkbox" ${this.isReviewed(file.path) ? 'checked' : ''}
+            ${file.synthetic ? 'disabled' : ''}
+            aria-label="Add ${escapeHtml(file.name)} to review">
+          <span>${escapeHtml(file.name)}</span>
+        </label>
+      </td>
       <td>${formatSize(file.size)}</td>
       <td class="file-path" title="${escapeHtml(displayPath)}">${escapeHtml(displayPath)}</td>
     `;
     if (file.synthetic) {
       return row;
     }
+    row.querySelector('input').addEventListener('click', (event) => {
+      event.stopPropagation();
+      this.onToggleReview({
+        ...file,
+        type: 'file'
+      });
+    });
     row.addEventListener('click', () => this.onSelect(file.path));
     row.addEventListener('contextmenu', (event) => {
       event.preventDefault();
@@ -164,6 +182,8 @@ export class PanelsView {
         name: file.name,
         path: file.path,
         type: 'file',
+        size: file.size,
+        logicalSize: file.logicalSize,
         node: null
       });
     });
@@ -194,15 +214,21 @@ export class PanelsView {
 
   setTab(tabName) {
     const files = tabName === 'files';
+    const review = tabName === 'review';
+    const folders = !files && !review;
     this.elements.filesTab.classList.toggle('active', files);
-    this.elements.foldersTab.classList.toggle('active', !files);
+    this.elements.foldersTab.classList.toggle('active', folders);
+    this.elements.reviewTab.classList.toggle('active', review);
     this.elements.filesPanel.classList.toggle('active', files);
-    this.elements.foldersPanel.classList.toggle('active', !files);
+    this.elements.foldersPanel.classList.toggle('active', folders);
+    this.elements.reviewPanel.classList.toggle('active', review);
   }
 
   bind() {
     this.elements.foldersTab.addEventListener('click', () => this.setTab('folders'));
     this.elements.filesTab.addEventListener('click', () => this.setTab('files'));
+    this.elements.reviewTab.addEventListener('click', () => this.setTab('review'));
+    document.addEventListener('diskstatsx:review-changed', () => this.renderLargestFiles());
     for (const header of document.querySelectorAll('.files-table th[data-sort]')) {
       header.addEventListener('click', () => {
         const key = header.dataset.sort;

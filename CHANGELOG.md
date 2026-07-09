@@ -2,6 +2,38 @@
 
 All notable changes are documented in this file.
 
+## 1.3.0 - 2026-07-09
+
+### Added
+
+- Persistent scan snapshots with in-app activation and bounded folder-level comparisons
+- Indexed file search with name, path, extension, size, modification-date, iCloud and shared-block filters
+- SQLite FTS5 name/path index for fast search across large scans
+- Guided cleanup candidates for disk images, installers, archives, cache payloads and old downloads
+- One-click handoff of cleanup candidates to the existing Review queue
+
+### Changed
+
+- Native traversal now writes rows directly into SQLite as `getattrlistbulk()` enumerates each directory
+- Removed the full in-memory native filesystem tree from the scan path; only the current bulk batch and APFS identity sets remain in memory
+- Added indexed file modification timestamps for search and cleanup workflows
+- Snapshot switching refreshes the allocated and logical totals from the active scan index
+
+## 1.2.0 - 2026-06-06
+
+### Added
+
+- Exact hard-link deduplication using Darwin device and file identifiers
+- Full APFS clone deduplication using clone IDs and clone reference metadata
+- Review list with multi-selection, CSV export and confirmed Move to Trash
+- Persistent custom path exclusions, including context-menu actions
+- Scan-details panel for allocated, logical, iCloud, excluded and unreadable data
+
+### Changed
+
+- Allocated-size labels now explicitly distinguish physical attribution from logical size
+- Partial APFS block sharing is reported as an allocation estimate instead of exact usage
+
 ## 1.1.0 - 2026-06-05
 
 ### Added

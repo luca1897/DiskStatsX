@@ -53,5 +53,6 @@ export const SUNBURST = {
 
 export const STORAGE_KEYS = {
   scanFilters: 'diskstatsx.scanFilters',
+  scanExclusions: 'diskstatsx.scanExclusions',
   sunburstRings: 'diskstatsx.sunburstRings'
 };

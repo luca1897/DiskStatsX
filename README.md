@@ -11,6 +11,8 @@ The scanner is written in C and enumerates directories with Apple's `getattrlist
 ## Highlights
 
 - Native macOS scanner using `open()` and `getattrlistbulk()`
+- Hard-link and full APFS-clone deduplication
+- Incremental SQLite scan index written while `getattrlistbulk()` walks the filesystem
 - SQLite scan index with lazy, two-level folder windows
 - Recursive hierarchy with aggregated allocated sizes
 - iCloud-only/dataless placeholders contribute `0 B` to local disk usage
@@ -18,13 +20,18 @@ The scanner is written in C and enumerates directories with Apple's `getattrlist
 - Cancelable scans
 - Native macOS folder picker alongside manual path entry
 - Integrated native macOS traffic-light window controls
-- Cache, external-volume and system-folder exclusions
+- Cache, external-volume, system-folder and persistent path exclusions
 - Virtualized directory tree for very large scans
 - Bounded two-level Treemap and Sunburst payloads regardless of total scan size
 - Largest-files summary with Top 10 overall and Top 3 plus `Other files` per first-level folder
 - Hierarchical OffscreenCanvas Treemap rendered in a Web Worker
 - Budgeted D3 Sunburst with two-level lazy views, zoom, ring controls and file filtering
 - Finder integration and contextual file actions
+- Review list with CSV export and confirmed Move to Trash
+- Persistent scan history with snapshot restore and folder-level comparisons
+- FTS-indexed file search by name, path, extension, size, modification date, iCloud and shared-block state
+- Guided cleanup candidates for large installers, archives, disk images, caches and old downloads
+- Allocated/logical size breakdown with scan-quality diagnostics
 - Apple Silicon desktop packaging
 
 ## Screenshots
@@ -97,6 +104,8 @@ macOS privacy controls can restrict folders such as Mail, Messages and parts of 
 `System Settings > Privacy & Security > Full Disk Access`
 
 The scanner skips permission errors and symbolic links.
+
+Hard links are attributed once per device/file ID. Full APFS clones sharing the same clone ID are also attributed once inside the selected scan. Files that may share only some APFS blocks are reported as an estimate because their shared physical extents cannot be apportioned exactly through `getattrlistbulk()`.
 
 ## Diagnostics
 

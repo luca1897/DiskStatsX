@@ -199,9 +199,13 @@ export class TreemapView {
       name: node.data.name,
       path: node.data.path,
       size: node.value,
+      logicalSize: Number(node.data.logicalSize || 0),
       type: node.data.type,
       synthetic: Boolean(node.data.synthetic),
       cloudOnly: Boolean(node.data.cloudOnly),
+      hardlinkDuplicate: Boolean(node.data.hardlinkDuplicate),
+      cloneDuplicate: Boolean(node.data.cloneDuplicate),
+      sharedBlocks: Boolean(node.data.sharedBlocks),
       extension: this.itemCategory(node),
       colorKey: node.data.type === 'directory'
         ? `folder:${node.data.path}`

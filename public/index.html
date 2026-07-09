@@ -27,6 +27,24 @@
             <label><input id="filter-caches" type="checkbox"> Exclude caches</label>
             <label><input id="filter-volumes" type="checkbox"> Exclude external volumes</label>
             <label><input id="filter-system" type="checkbox"> Exclude system folders</label>
+            <div class="filter-divider"></div>
+            <div class="exclusion-editor">
+              <span class="filter-heading">Always exclude paths</span>
+              <div class="exclusion-input-row">
+                <input id="filter-exclusion-input" type="text" placeholder="/path/to/folder"
+                  aria-label="Path to exclude">
+                <button id="filter-exclusion-add" type="button" title="Add exclusion">+</button>
+              </div>
+              <div id="filter-exclusion-list" class="exclusion-list"></div>
+            </div>
+          </div>
+        </div>
+        <div class="tools-control">
+          <button id="tools-button" class="toolbar-button" type="button" aria-expanded="false">Tools</button>
+          <div id="tools-popover" class="tools-popover" hidden>
+            <button type="button" data-tool-action="history">History</button>
+            <button type="button" data-tool-action="search">Find files</button>
+            <button type="button" data-tool-action="cleanup">Cleanup</button>
           </div>
         </div>
         <div class="view-switch" role="group" aria-label="Visualization mode">
@@ -50,7 +68,7 @@
                   <th data-tree-sort="name">Name</th>
                   <th data-tree-sort="percent">Subtree Perc.</th>
                   <th data-tree-sort="parentPercent">Perc.</th>
-                  <th data-tree-sort="size">Size</th>
+                  <th data-tree-sort="size">Allocated</th>
                   <th data-tree-sort="items">Items</th>
                   <th data-tree-sort="files">Files</th>
                   <th data-tree-sort="subdirs">Subdirs</th>
@@ -67,7 +85,7 @@
                   <th>Extension</th>
                   <th>Color</th>
                   <th>Description</th>
-                  <th>Bytes</th>
+                  <th>Allocated</th>
                   <th>%</th>
                 </tr>
               </thead>
@@ -118,6 +136,9 @@
               <div class="tabs" role="tablist">
                 <button id="folders-tab" class="tab active" type="button">Largest Folders</button>
                 <button id="files-tab" class="tab" type="button">Largest Files</button>
+                <button id="review-tab" class="tab" type="button">
+                  Review <span id="review-count" class="tab-count">0</span>
+                </button>
               </div>
 
               <div id="folders-panel" class="panel-view active">
@@ -129,12 +150,38 @@
                   <thead>
                     <tr>
                       <th data-sort="name">Name</th>
-                      <th data-sort="size">Size</th>
+                      <th data-sort="size">Allocated</th>
                       <th data-sort="path">Path</th>
                     </tr>
                   </thead>
                   <tbody id="largest-files"></tbody>
                 </table>
+              </div>
+
+              <div id="review-panel" class="panel-view">
+                <div class="review-toolbar">
+                  <strong><span id="review-total-count">0</span> selected</strong>
+                  <span id="review-total-size">0 B allocated</span>
+                  <div class="review-actions">
+                    <button id="review-export" type="button">Export CSV</button>
+                    <button id="review-clear" type="button">Clear</button>
+                    <button id="review-trash" class="danger-button" type="button">Move to Trash</button>
+                  </div>
+                </div>
+                <table class="review-table">
+                  <thead>
+                    <tr>
+                      <th aria-label="Selected"></th>
+                      <th>Name</th>
+                      <th>Allocated</th>
+                      <th>Path</th>
+                    </tr>
+                  </thead>
+                  <tbody id="review-items"></tbody>
+                </table>
+                <div id="review-empty" class="review-empty">
+                  Add files or folders from the context menu or Largest Files.
+                </div>
               </div>
             </aside>
           </section>
@@ -145,12 +192,174 @@
         <div><span class="label">Files</span><span id="files-count">0</span></div>
         <div><span class="label">Dirs</span><span id="dirs-count">0</span></div>
         <div><span class="label">Elapsed</span><span id="elapsed">0s</span></div>
-        <div><span class="label">Total</span><span id="total-size">0 B</span></div>
+        <div><span class="label">Allocated</span><span id="total-size">0 B</span></div>
+        <div><span class="label">Logical</span><span id="logical-size">0 B</span></div>
+        <button id="scan-details-button" class="scan-details-button" type="button"
+          aria-expanded="false">Scan details</button>
+        <div id="scan-details" class="scan-details" hidden></div>
       </footer>
     </div>
 
     <div id="tooltip" class="tooltip" role="tooltip"></div>
     <div id="context-menu" class="context-menu" role="menu" aria-hidden="true"></div>
+
+    <dialog id="history-dialog" class="app-dialog history-dialog" aria-labelledby="history-dialog-title">
+      <div class="dialog-header">
+        <div>
+          <span class="dialog-kicker">Snapshot archive</span>
+          <h2 id="history-dialog-title">Scan history</h2>
+        </div>
+        <button id="history-close" class="dialog-close" type="button" aria-label="Close" title="Close">&times;</button>
+      </div>
+      <div class="dialog-body">
+        <div class="dialog-controls history-controls">
+          <label class="dialog-field">
+            <span>Baseline</span>
+            <select id="history-before" aria-label="Baseline snapshot"></select>
+          </label>
+          <label class="dialog-field">
+            <span>Compare with</span>
+            <select id="history-after" aria-label="Comparison snapshot"></select>
+          </label>
+          <button id="history-compare" class="dialog-primary" type="button">Compare</button>
+          <button id="history-refresh" class="dialog-secondary" type="button">Refresh</button>
+        </div>
+        <div id="history-empty" class="dialog-empty">No completed scans yet.</div>
+        <div id="history-table-wrap" class="dialog-table-wrap">
+          <table class="dialog-table history-table">
+            <thead>
+              <tr>
+                <th>Captured</th>
+                <th>Path</th>
+                <th>Allocated</th>
+                <th>Files</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="history-list"></tbody>
+          </table>
+        </div>
+        <section id="history-comparison" class="comparison-panel" hidden>
+          <div class="comparison-summary">
+            <span id="comparison-before">0 B</span>
+            <strong id="comparison-delta">0 B</strong>
+            <span id="comparison-after">0 B</span>
+          </div>
+          <div id="comparison-empty" class="dialog-empty" hidden>No folder changes in the selected snapshots.</div>
+          <div id="comparison-table-wrap" class="dialog-table-wrap comparison-table-wrap">
+            <table class="dialog-table comparison-table">
+              <thead>
+                <tr>
+                  <th>Folder</th>
+                  <th>Before</th>
+                  <th>After</th>
+                  <th>Change</th>
+                  <th>State</th>
+                </tr>
+              </thead>
+              <tbody id="comparison-list"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </dialog>
+
+    <dialog id="search-dialog" class="app-dialog search-dialog" aria-labelledby="search-dialog-title">
+      <div class="dialog-header">
+        <div>
+          <span class="dialog-kicker">SQLite index</span>
+          <h2 id="search-dialog-title">Find files</h2>
+        </div>
+        <button id="search-close" class="dialog-close" type="button" aria-label="Close" title="Close">&times;</button>
+      </div>
+      <div class="dialog-body search-dialog-body">
+        <form id="search-form" class="dialog-controls search-controls">
+          <label class="dialog-field search-term-field">
+            <span>Name or path</span>
+            <input id="search-term" type="search" autocomplete="off" spellcheck="false" placeholder="Any file">
+          </label>
+          <label class="dialog-field">
+            <span>Extension</span>
+            <input id="search-extension" type="text" autocomplete="off" spellcheck="false" placeholder=".dmg">
+          </label>
+          <label class="dialog-field size-field">
+            <span>Min MB</span>
+            <input id="search-min-size" type="number" min="0" step="1" inputmode="numeric">
+          </label>
+          <label class="dialog-field size-field">
+            <span>Max MB</span>
+            <input id="search-max-size" type="number" min="0" step="1" inputmode="numeric">
+          </label>
+          <label class="dialog-field date-field">
+            <span>Modified after</span>
+            <input id="search-after" type="date">
+          </label>
+          <label class="dialog-field date-field">
+            <span>Modified before</span>
+            <input id="search-before" type="date">
+          </label>
+          <label class="dialog-toggle"><input id="search-cloud-only" type="checkbox"> Cloud-only</label>
+          <label class="dialog-toggle"><input id="search-shared-blocks" type="checkbox"> Shared blocks</label>
+          <button id="search-submit" class="dialog-primary" type="submit">Search</button>
+          <button id="search-reset" class="dialog-secondary" type="button">Reset</button>
+        </form>
+        <div class="result-heading">
+          <span id="search-result-count">No search yet</span>
+        </div>
+        <div id="search-empty" class="dialog-empty">Search results appear here.</div>
+        <div id="search-table-wrap" class="dialog-table-wrap search-table-wrap" hidden>
+          <table class="dialog-table search-table">
+            <thead>
+              <tr>
+                <th data-search-sort="name">Name</th>
+                <th data-search-sort="size">Allocated</th>
+                <th data-search-sort="modifiedAt">Modified</th>
+                <th data-search-sort="path">Path</th>
+              </tr>
+            </thead>
+            <tbody id="search-results"></tbody>
+          </table>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="cleanup-dialog" class="app-dialog cleanup-dialog" aria-labelledby="cleanup-dialog-title">
+      <div class="dialog-header">
+        <div>
+          <span class="dialog-kicker">Review queue</span>
+          <h2 id="cleanup-dialog-title">Cleanup candidates</h2>
+        </div>
+        <button id="cleanup-close" class="dialog-close" type="button" aria-label="Close" title="Close">&times;</button>
+      </div>
+      <div class="dialog-body cleanup-dialog-body">
+        <form id="cleanup-form" class="dialog-controls cleanup-controls">
+          <label class="dialog-field cleanup-age-field">
+            <span>Old downloads</span>
+            <input id="cleanup-days" type="number" min="0" max="36500" step="1" value="30" inputmode="numeric">
+            <em>days</em>
+          </label>
+          <button id="cleanup-refresh" class="dialog-secondary" type="submit">Refresh</button>
+          <button id="cleanup-add-all" class="dialog-primary" type="button" disabled>Add to Review</button>
+          <span id="cleanup-result-count" class="result-count">No candidates loaded</span>
+        </form>
+        <div id="cleanup-categories" class="cleanup-categories"></div>
+        <div id="cleanup-empty" class="dialog-empty">Cleanup candidates appear here.</div>
+        <div id="cleanup-table-wrap" class="dialog-table-wrap cleanup-table-wrap" hidden>
+          <table class="dialog-table cleanup-table">
+            <thead>
+              <tr>
+                <th>Category</th>
+                <th>Name</th>
+                <th>Allocated</th>
+                <th>Modified</th>
+                <th>Path</th>
+              </tr>
+            </thead>
+            <tbody id="cleanup-results"></tbody>
+          </table>
+        </div>
+      </div>
+    </dialog>
 
     <script src="/vendor/d3.min.js"></script>
     <script type="module" src="/js/app.mjs"></script>

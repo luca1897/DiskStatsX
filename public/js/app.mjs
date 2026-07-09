@@ -8,13 +8,18 @@ import {
 import { AppStore } from './core/store.mjs';
 import { createDemoTree } from './demo-data.mjs';
 import { ContextMenu } from './components/context-menu.mjs';
+import { CleanupController } from './components/cleanup-controller.mjs';
 import { FilterController } from './components/filter-controller.mjs';
+import { HistoryController } from './components/history-controller.mjs';
 import { PanelsView } from './components/panels-view.mjs';
+import { ReviewController } from './components/review-controller.mjs';
+import { SearchController } from './components/search-controller.mjs';
 import { StatusView } from './components/status-view.mjs';
 import { SunburstView } from './components/sunburst-view.mjs';
 import { Tooltip } from './components/tooltip.mjs';
 import { TreeView } from './components/tree-view.mjs';
 import { TreemapView } from './components/treemap-view.mjs';
+import { ToolsMenuController } from './components/tools-menu-controller.mjs';
 
 document.documentElement.classList.toggle(
   'electron-macos',
@@ -37,14 +42,57 @@ class DiskStatsApp {
     this.resultRequestId = 0;
     this.largestFilesSummary = null;
     this.demoMode = new URLSearchParams(window.location.search).has('demo');
+    this.reviewController = new ReviewController({
+      elements: this.elements,
+      onMessage: (message) => this.setToolbarMessage(message)
+    });
 
     this.contextMenu = new ContextMenu({
       element: this.elements.contextMenu,
       api: this.api,
       getRoot: () => this.store.state.root,
       onAnalyze: (node) => this.navigateToDirectory(node),
+      onAnalyzePath: (path) => this.fetchResult(path),
       onRescan: (path) => this.startScan(path),
+      onExclude: (path) => {
+        if (this.filters.addPath(path)) {
+          this.setToolbarMessage('Folder added to permanent exclusions');
+        } else {
+          this.setToolbarMessage('Folder is already excluded');
+        }
+      },
+      onToggleReview: (target) => this.reviewController.toggle(target),
+      isReviewed: (path) => this.reviewController.has(path),
       onMessage: (message) => this.setToolbarMessage(message)
+    });
+
+    this.historyController = new HistoryController({
+      elements: this.elements,
+      api: this.api,
+      onActivate: (status) => this.activateSnapshot(status),
+      onMessage: (message) => this.setToolbarMessage(message)
+    });
+    this.searchController = new SearchController({
+      elements: this.elements,
+      api: this.api,
+      onContextMenu: (event, target) => this.contextMenu.show(event, target),
+      onSelect: (path) => this.setSelectedPath(path),
+      onToggleReview: (target) => this.reviewController.toggle(target),
+      isReviewed: (path) => this.reviewController.has(path),
+      onMessage: (message) => this.setToolbarMessage(message)
+    });
+    this.cleanupController = new CleanupController({
+      elements: this.elements,
+      api: this.api,
+      onContextMenu: (event, target) => this.contextMenu.show(event, target),
+      onToggleReview: (target) => this.reviewController.toggle(target),
+      onAddToReview: (targets) => this.reviewController.addMany(targets),
+      isReviewed: (path) => this.reviewController.has(path),
+      onMessage: (message) => this.setToolbarMessage(message)
+    });
+    this.toolsMenu = new ToolsMenuController({
+      elements: this.elements,
+      onAction: (action) => this.openTool(action)
     });
 
     const commonCallbacks = {
@@ -76,7 +124,9 @@ class DiskStatsApp {
       elements: this.elements,
       extensionColor: this.colors.extension,
       ...commonCallbacks,
-      onHighlightExtension: (extension) => this.treemapView.setHighlightedExtension(extension)
+      onHighlightExtension: (extension) => this.treemapView.setHighlightedExtension(extension),
+      onToggleReview: (target) => this.reviewController.toggle(target),
+      isReviewed: (path) => this.reviewController.has(path)
     });
 
     this.bind();
@@ -195,6 +245,9 @@ class DiskStatsApp {
         this.updateStatus(payload);
         this.elements.pathInput.value = payload.rootPath;
         this.fetchResult(payload.rootPath);
+        if (this.elements.historyDialog.open) {
+          this.historyController.refresh();
+        }
       },
       'scan-error': (payload) => this.handleScanError(payload),
       'connection-error': () => {
@@ -206,10 +259,17 @@ class DiskStatsApp {
   }
 
   async startScan(path) {
+    if (this.demoMode) {
+      this.demoMode = false;
+      await this.loadConfig();
+    }
     this.resultRequestId++;
     this.resultLoadPromise = null;
     this.resultLoadPath = null;
     this.largestFilesSummary = null;
+    this.reviewController.clear();
+    this.searchController.invalidate();
+    this.cleanupController.invalidate();
     this.store.resetForScan(path);
     this.clearViews();
     this.showEmptyState(
@@ -218,6 +278,9 @@ class DiskStatsApp {
     );
     this.renderStatus();
     await this.api.startScan(path, this.filters.value);
+    if (!this.eventSource) {
+      this.connectEvents();
+    }
   }
 
   async cancelScan() {
@@ -248,6 +311,41 @@ class DiskStatsApp {
     return this.resultLoadPromise;
   }
 
+  async activateSnapshot(status) {
+    if (!status?.rootPath) {
+      return;
+    }
+    this.resultRequestId++;
+    this.resultLoadPromise = null;
+    this.resultLoadPath = null;
+    this.largestFilesSummary = null;
+    this.reviewController.clear();
+    this.searchController.invalidate();
+    this.cleanupController.invalidate();
+    this.updateStatus(status);
+    this.elements.pathInput.value = status.rootPath;
+    this.clearViews();
+    await this.fetchResult(status.rootPath);
+  }
+
+  async openTool(action) {
+    if (this.demoMode) {
+      this.setToolbarMessage('Tools are available after a native scan');
+      return;
+    }
+    if (action === 'history') {
+      await this.historyController.open();
+      return;
+    }
+    if (action === 'search') {
+      this.searchController.open();
+      return;
+    }
+    if (action === 'cleanup') {
+      await this.cleanupController.open();
+    }
+  }
+
   async loadResult(path, requestId) {
     try {
       const data = await this.api.getResult(path);
@@ -276,6 +374,7 @@ class DiskStatsApp {
       selectedPath: root.data.path,
       largestFilesSummary: this.largestFilesSummary
     });
+    this.renderStatus();
 
     this.elements.emptyState.classList.add('hidden');
     this.elements.treemapEmpty.classList.add('hidden');
@@ -358,7 +457,8 @@ class DiskStatsApp {
   renderStatus() {
     this.statusView.render(
       this.store.state.status,
-      this.store.state.treeData?.size || this.store.state.root?.value || 0
+      this.store.state.treeData?.size || this.store.state.root?.value || 0,
+      this.store.state.treeData?.scanSummary || null
     );
   }
 

@@ -90,3 +90,114 @@ test('native index returns a bounded folder view with an Other files cluster', a
   assert.ok(sparseFile.size < 1024 * 1024);
   assert.equal(sparseFile.cloudOnly, false);
 });
+
+test('native scanner deduplicates hard links and full APFS clones', async (context) => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'diskstatsx-links-'));
+  const rootPath = path.join(temporaryDirectory, 'root');
+  const databasePath = path.join(temporaryDirectory, 'scan.sqlite');
+  const originalPath = path.join(rootPath, 'original.bin');
+  const hardlinkPath = path.join(rootPath, 'hardlink.bin');
+  const clonePath = path.join(rootPath, 'clone.bin');
+  await fs.mkdir(rootPath, { recursive: true });
+  await fs.writeFile(originalPath, Buffer.alloc(64 * 1024, 7));
+  await fs.link(originalPath, hardlinkPath);
+  let cloneCreated = true;
+  try {
+    await fs.copyFile(originalPath, clonePath, fs.constants.COPYFILE_FICLONE_FORCE);
+  } catch {
+    cloneCreated = false;
+  }
+
+  context.after(() => fs.rm(temporaryDirectory, { recursive: true, force: true }));
+
+  await execFileAsync(scannerPath, [rootPath, '--database', databasePath], {
+    maxBuffer: 4 * 1024 * 1024
+  });
+  const { stdout } = await execFileAsync(
+    scannerPath,
+    ['--query', databasePath, rootPath],
+    { maxBuffer: 4 * 1024 * 1024 }
+  );
+  const view = JSON.parse(stdout);
+  const hardlinkDuplicate = view.children.find((entry) => entry.hardlinkDuplicate);
+
+  assert.equal(view.scanSummary.hardlinkDuplicates, 1);
+  assert.ok(view.scanSummary.hardlinkBytesSaved > 0);
+  assert.equal(hardlinkDuplicate.size, 0);
+  assert.ok(hardlinkDuplicate.logicalSize > 0);
+  if (cloneCreated) {
+    assert.equal(view.scanSummary.cloneDuplicates, 1);
+    assert.ok(view.scanSummary.cloneBytesSaved > 0);
+    assert.equal(view.scanSummary.allocationIsEstimate, true);
+  }
+});
+
+test('native index searches files, suggests cleanup candidates and compares snapshots', async (context) => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'diskstatsx-query-'));
+  const rootPath = path.join(temporaryDirectory, 'root');
+  const downloadsPath = path.join(rootPath, 'Downloads');
+  const beforeDatabase = path.join(temporaryDirectory, 'before.sqlite');
+  const afterDatabase = path.join(temporaryDirectory, 'after.sqlite');
+  const reportPath = path.join(rootPath, 'release-report.pdf');
+  const imagePath = path.join(downloadsPath, 'old-installer.dmg');
+  await fs.mkdir(downloadsPath, { recursive: true });
+  await fs.writeFile(reportPath, Buffer.alloc(2 * 1024 * 1024, 0x31));
+  await fs.writeFile(imagePath, Buffer.alloc(52 * 1024 * 1024, 0x5a));
+  const recentTimestamp = new Date();
+  await fs.utimes(reportPath, recentTimestamp, recentTimestamp);
+
+  context.after(() => fs.rm(temporaryDirectory, { recursive: true, force: true }));
+
+  await execFileAsync(scannerPath, [rootPath, '--database', beforeDatabase], {
+    maxBuffer: 4 * 1024 * 1024
+  });
+  const search = await execFileAsync(scannerPath, [
+    '--search',
+    beforeDatabase,
+    'release-report',
+    '--extension',
+    '.pdf',
+    '--min-size',
+    String(1024 * 1024),
+    '--modified-after',
+    String(Math.floor(recentTimestamp.getTime() / 1000) - 60)
+  ]);
+  const searchResult = JSON.parse(search.stdout);
+  assert.equal(searchResult.results.length, 1);
+  assert.equal(searchResult.results[0].path, reportPath);
+  assert.ok(searchResult.results[0].modifiedAt > 0);
+
+  const tokenizedTerm = Array.from({ length: 120 }, () => 'a').join(' ');
+  const tokenizedSearch = await execFileAsync(scannerPath, [
+    '--search',
+    beforeDatabase,
+    tokenizedTerm
+  ]);
+  assert.ok(Array.isArray(JSON.parse(tokenizedSearch.stdout).results));
+
+  const cleanup = await execFileAsync(scannerPath, [
+    '--cleanup',
+    beforeDatabase,
+    '--limit',
+    '10'
+  ]);
+  const cleanupResult = JSON.parse(cleanup.stdout);
+  const diskImage = cleanupResult.results.find((entry) => entry.path === imagePath);
+  assert.equal(diskImage.cleanupCategory, 'Disk image');
+
+  await fs.writeFile(path.join(downloadsPath, 'new-build.bin'), Buffer.alloc(2 * 1024 * 1024, 0x24));
+  await execFileAsync(scannerPath, [rootPath, '--database', afterDatabase], {
+    maxBuffer: 4 * 1024 * 1024
+  });
+  const comparison = await execFileAsync(scannerPath, [
+    '--compare',
+    beforeDatabase,
+    afterDatabase
+  ]);
+  const comparisonResult = JSON.parse(comparison.stdout);
+  assert.equal(comparisonResult.delta.fileCount, 1);
+  assert.ok(comparisonResult.delta.allocatedBytes > 0);
+  assert.ok(comparisonResult.changes.some((entry) => (
+    entry.path === downloadsPath && entry.kind === 'grown' && entry.delta > 0
+  )));
+});

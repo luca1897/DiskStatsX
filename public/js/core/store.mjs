@@ -4,6 +4,16 @@ const INITIAL_STATUS = {
   filesScanned: 0,
   directoriesScanned: 0,
   bytesDiscovered: 0,
+  logicalBytesDiscovered: 0,
+  cloudOnlyFiles: 0,
+  symlinksSkipped: 0,
+  unreadableDirectories: 0,
+  excludedDirectories: 0,
+  hardlinkDuplicates: 0,
+  hardlinkBytesSaved: 0,
+  cloneDuplicates: 0,
+  cloneBytesSaved: 0,
+  sharedBlockFiles: 0,
   elapsedMs: 0,
   error: null
 };

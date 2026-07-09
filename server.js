@@ -9,8 +9,10 @@ const PORT = Number(process.env.PORT || 3000);
 const scannerPath = process.env.DISKSTATSX_SCANNER_PATH || path.join(__dirname, 'scanner');
 const resultPath = process.env.DISKSTATSX_RESULT_PATH ||
   path.join(os.tmpdir(), 'diskstatsx-scan-index.sqlite');
+const historyPath = process.env.DISKSTATSX_HISTORY_PATH ||
+  path.join(path.dirname(resultPath), 'diskstatsx-scan-history');
 
-const scanManager = new ScanManager({ scannerPath, resultPath });
+const scanManager = new ScanManager({ scannerPath, resultPath, historyPath });
 const app = createApp({
   scanManager,
   defaultScanPath: os.homedir(),

@@ -32,6 +32,48 @@ export class ApiClient {
     return parseResponse(response);
   }
 
+  async getHistory() {
+    const response = await fetch('/history');
+    return parseResponse(response);
+  }
+
+  async activateHistory(id) {
+    const response = await fetch('/history/activate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    return parseResponse(response);
+  }
+
+  async compareHistory(beforeId, afterId) {
+    const query = new URLSearchParams({ beforeId, afterId });
+    const response = await fetch(`/compare?${query}`);
+    return parseResponse(response);
+  }
+
+  async searchFiles(options) {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options || {})) {
+      if (value !== undefined && value !== null && value !== '' && value !== false) {
+        query.set(key, String(value));
+      }
+    }
+    const response = await fetch(`/search?${query}`);
+    return parseResponse(response);
+  }
+
+  async getCleanup(options = {}) {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== null && value !== '') {
+        query.set(key, String(value));
+      }
+    }
+    const response = await fetch(`/cleanup?${query}`);
+    return parseResponse(response);
+  }
+
   async runSystemAction(action, path) {
     const response = await fetch('/system-action', {
       method: 'POST',

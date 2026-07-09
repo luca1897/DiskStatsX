@@ -23,5 +23,7 @@ globalThis.addEventListener('unhandledrejection', (event) => {
 
 contextBridge.exposeInMainWorld('diskStatsX', {
   platform: process.platform,
-  selectDirectory: () => ipcRenderer.invoke('diskstatsx:select-directory')
+  selectDirectory: () => ipcRenderer.invoke('diskstatsx:select-directory'),
+  trashItems: (items) => ipcRenderer.invoke('diskstatsx:trash-items', items),
+  exportReview: (csv) => ipcRenderer.invoke('diskstatsx:export-review', csv)
 });

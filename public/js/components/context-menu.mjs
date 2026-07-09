@@ -1,12 +1,27 @@
 import { findNodeByPath, parentDirectoryPath } from '../core/hierarchy.mjs';
 
 export class ContextMenu {
-  constructor({ element, api, getRoot, onAnalyze, onRescan, onMessage }) {
+  constructor({
+    element,
+    api,
+    getRoot,
+    onAnalyze,
+    onAnalyzePath,
+    onRescan,
+    onExclude,
+    onToggleReview,
+    isReviewed,
+    onMessage
+  }) {
     this.element = element;
     this.api = api;
     this.getRoot = getRoot;
     this.onAnalyze = onAnalyze;
+    this.onAnalyzePath = onAnalyzePath;
     this.onRescan = onRescan;
+    this.onExclude = onExclude;
+    this.onToggleReview = onToggleReview;
+    this.isReviewed = isReviewed;
     this.onMessage = onMessage;
     this.bindGlobalEvents();
   }
@@ -24,18 +39,35 @@ export class ContextMenu {
         const directory = node || findNodeByPath(this.getRoot(), target.path);
         if (directory) {
           this.onAnalyze(directory);
+        } else {
+          this.onAnalyzePath(target.path);
         }
-      }, !node));
+      }));
       this.element.appendChild(this.createItem('Rescan this folder', () => this.onRescan(target.path)));
+      this.element.appendChild(this.createItem(
+        'Always exclude this folder',
+        () => this.onExclude(target.path)
+      ));
     } else {
       const parentNode = node?.parent || findNodeByPath(root, parentDirectoryPath(target.path));
       this.element.appendChild(this.createItem('Analyze containing folder', () => {
         if (parentNode) {
           this.onAnalyze(parentNode);
+        } else {
+          this.onAnalyzePath(parentDirectoryPath(target.path));
         }
-      }, !parentNode));
+      }));
     }
 
+    this.element.appendChild(this.createSeparator());
+    this.element.appendChild(this.createItem(
+      this.isReviewed(target.path) ? 'Remove from Review' : 'Add to Review',
+      () => this.onToggleReview({
+        ...target,
+        size: Number(target.size || node?.value || 0),
+        logicalSize: Number(target.logicalSize || node?.data.logicalSize || 0)
+      })
+    ));
     this.element.appendChild(this.createSeparator());
     this.element.appendChild(this.createItem('Show in Finder', () => this.api.runSystemAction('reveal', target.path)));
     this.element.appendChild(this.createItem('Open', () => this.api.runSystemAction('open', target.path)));

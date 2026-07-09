@@ -18,7 +18,11 @@ function scannerPath() {
 }
 
 function resultPath() {
-  return path.join(app.getPath('userData'), 'scan-index.sqlite');
+  return path.join(app.getPath('userData'), 'scan-index-working.sqlite');
+}
+
+function historyPath() {
+  return path.join(app.getPath('userData'), 'scans');
 }
 
 function initializeLogging() {
@@ -131,6 +135,7 @@ async function boot() {
   initializeLogging();
   process.env.DISKSTATSX_SCANNER_PATH = scannerPath();
   process.env.DISKSTATSX_RESULT_PATH = resultPath();
+  process.env.DISKSTATSX_HISTORY_PATH = historyPath();
 
   const { scanManager, startServer } = require('./server');
   scanManager.on('status', (event, status) => {
@@ -143,15 +148,19 @@ async function boot() {
       filesScanned: status.filesScanned,
       directoriesScanned: status.directoriesScanned,
       bytesDiscovered: status.bytesDiscovered,
+      logicalBytesDiscovered: status.logicalBytesDiscovered,
+      hardlinkDuplicates: status.hardlinkDuplicates,
+      cloneDuplicates: status.cloneDuplicates,
+      sharedBlockFiles: status.sharedBlockFiles,
+      cloudOnlyFiles: status.cloudOnlyFiles,
+      excludedDirectories: status.excludedDirectories,
+      unreadableDirectories: status.unreadableDirectories,
       elapsedMs: status.elapsedMs,
       error: status.error
     };
     if (event === 'done') {
-      try {
-        details.resultBytes = fs.statSync(resultPath()).size;
-      } catch {
-        details.resultBytes = null;
-      }
+      details.resultBytes = status.resultBytes;
+      details.snapshotId = status.snapshotId;
     }
     logger.info(`scan-${event}`, details);
   });
@@ -167,6 +176,62 @@ async function boot() {
       properties: ['openDirectory', 'createDirectory']
     });
     return result.canceled ? null : result.filePaths[0];
+  });
+  ipcMain.handle('diskstatsx:trash-items', async (_event, requestedItems) => {
+    const items = Array.isArray(requestedItems)
+      ? requestedItems
+          .filter((item) => (
+            item &&
+            typeof item.path === 'string' &&
+            path.isAbsolute(item.path) &&
+            fs.existsSync(item.path)
+          ))
+          .slice(0, 500)
+      : [];
+    if (!items.length) {
+      return { moved: 0, failed: [] };
+    }
+    const preview = items.slice(0, 5).map((item) => item.path).join('\n');
+    const remainder = items.length > 5 ? `\n...and ${items.length - 5} more` : '';
+    const confirmation = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: 'Move selected items to Trash?',
+      message: `Move ${items.length} selected ${items.length === 1 ? 'item' : 'items'} to Trash?`,
+      detail: `${preview}${remainder}\n\nDiskStatsX will not permanently delete them.`,
+      buttons: ['Cancel', 'Move to Trash'],
+      defaultId: 0,
+      cancelId: 0
+    });
+    if (confirmation.response !== 1) {
+      return { canceled: true, moved: 0, failed: [] };
+    }
+    const failed = [];
+    let moved = 0;
+    for (const item of items) {
+      try {
+        await shell.trashItem(path.resolve(item.path));
+        moved++;
+      } catch (error) {
+        failed.push({
+          path: item.path,
+          error: error.message
+        });
+      }
+    }
+    logger?.info('review-items-trashed', { moved, failed: failed.length });
+    return { canceled: false, moved, failed };
+  });
+  ipcMain.handle('diskstatsx:export-review', async (_event, csv) => {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export review list',
+      defaultPath: 'DiskStatsX-review.csv',
+      filters: [{ name: 'CSV document', extensions: ['csv'] }]
+    });
+    if (result.canceled || !result.filePath) {
+      return { canceled: true };
+    }
+    fs.writeFileSync(result.filePath, String(csv || ''), 'utf8');
+    return { canceled: false, path: result.filePath };
   });
   ipcMain.on('diskstatsx:renderer-error', (_event, payload) => {
     logger?.error('renderer-javascript-error', compactRendererError(payload));

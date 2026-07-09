@@ -47,6 +47,21 @@ export function createDemoTree() {
   ]);
 
   finalize(root);
+  root.scanSummary = {
+    allocatedBytes: root.size,
+    logicalBytes: Math.round(root.size * 1.08),
+    cloudOnlyFiles: 7,
+    symlinksSkipped: 12,
+    unreadableDirectories: 1,
+    excludedDirectories: 3,
+    excludedBytes: null,
+    hardlinkDuplicates: 18,
+    hardlinkBytesSaved: 640 * MIB,
+    cloneDuplicates: 9,
+    cloneBytesSaved: 1.8 * GIB,
+    sharedBlockFiles: 24,
+    allocationIsEstimate: true
+  };
   return root;
 }
 

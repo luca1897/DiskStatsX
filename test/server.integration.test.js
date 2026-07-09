@@ -7,6 +7,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { URLSearchParams } = require('node:url');
 const { createApp } = require('../server/create-app');
 const { ScanManager } = require('../server/scan-manager');
 
@@ -18,9 +19,11 @@ test('API scans a directory with native cache exclusions', async (context) => {
   const fixturePath = path.join(temporaryDirectory, 'fixture');
   await fs.mkdir(path.join(fixturePath, 'keep', 'nested'), { recursive: true });
   await fs.mkdir(path.join(fixturePath, 'Caches'), { recursive: true });
+  await fs.mkdir(path.join(fixturePath, 'ignored'), { recursive: true });
   await fs.writeFile(path.join(fixturePath, 'keep', 'visible.bin'), Buffer.alloc(4096));
   await fs.writeFile(path.join(fixturePath, 'keep', 'nested', 'deep.bin'), Buffer.alloc(2048));
   await fs.writeFile(path.join(fixturePath, 'Caches', 'hidden.bin'), Buffer.alloc(8192));
+  await fs.writeFile(path.join(fixturePath, 'ignored', 'hidden.bin'), Buffer.alloc(4096));
 
   const manager = new ScanManager({
     scannerPath: path.join(projectRoot, 'scanner'),
@@ -53,7 +56,10 @@ test('API scans a directory with native cache exclusions', async (context) => {
     },
     body: JSON.stringify({
       path: fixturePath,
-      filters: { caches: true }
+      filters: {
+        caches: true,
+        exclusions: [path.join(fixturePath, 'ignored')]
+      }
     })
   });
   assert.equal(startResponse.status, 202);
@@ -68,6 +74,7 @@ test('API scans a directory with native cache exclusions', async (context) => {
   assert.deepEqual(tree.children.map((child) => child.name), ['keep']);
   assert.equal(tree.lazy, true);
   assert.equal(tree.fileCount, 2);
+  assert.equal(tree.scanSummary.excludedDirectories, 2);
   assert.equal(tree.children[0].fileCount, 2);
   assert.deepEqual(
     tree.children[0].children.map((entry) => entry.name),
@@ -139,6 +146,89 @@ test('local service rejects foreign hosts, origins and unauthenticated API reque
   assert.match(cookie, /^diskstatsx_session=[A-Za-z0-9_-]+;/);
   assert.match(cookie, /HttpOnly/);
   assert.match(cookie, /SameSite=Strict/);
+});
+
+test('API persists snapshots and serves indexed search and comparisons', async (context) => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'diskstatsx-history-'));
+  const resultPath = path.join(temporaryDirectory, 'result.sqlite');
+  const historyPath = path.join(temporaryDirectory, 'history');
+  const fixturePath = path.join(temporaryDirectory, 'fixture');
+  const baselinePath = path.join(fixturePath, 'baseline.bin');
+  await fs.mkdir(fixturePath, { recursive: true });
+  await fs.writeFile(baselinePath, Buffer.alloc(8192, 0x18));
+
+  const manager = new ScanManager({
+    scannerPath: path.join(projectRoot, 'scanner'),
+    resultPath,
+    historyPath
+  });
+  const app = createApp({
+    scanManager: manager,
+    defaultScanPath: fixturePath,
+    publicPath: path.join(projectRoot, 'public'),
+    vendorPath: path.join(projectRoot, 'node_modules', 'd3', 'dist')
+  });
+  const server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  context.after(async () => {
+    manager.dispose();
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  manager.start(fixturePath, {
+    caches: false,
+    externalVolumes: false,
+    systemFolders: false,
+    exclusions: []
+  });
+  await waitForStatus(manager, 'done');
+  await fs.writeFile(path.join(fixturePath, 'release-notes.txt'), Buffer.alloc(16384, 0x44));
+  manager.start(fixturePath, {
+    caches: false,
+    externalVolumes: false,
+    systemFolders: false,
+    exclusions: []
+  });
+  await waitForStatus(manager, 'done');
+
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const configResponse = await fetch(`${baseUrl}/config`);
+  const sessionCookie = configResponse.headers.get('set-cookie').split(';', 1)[0];
+  const headers = { Cookie: sessionCookie };
+  const historyResponse = await fetch(`${baseUrl}/history`, { headers });
+  assert.equal(historyResponse.status, 200);
+  const history = await historyResponse.json();
+  assert.equal(history.snapshots.length, 2);
+  const after = history.snapshots.find((snapshot) => snapshot.active);
+  const before = history.snapshots.find((snapshot) => snapshot.id !== after.id);
+
+  const searchResponse = await fetch(`${baseUrl}/search?term=release-notes`, { headers });
+  assert.equal(searchResponse.status, 200);
+  const search = await searchResponse.json();
+  assert.deepEqual(search.results.map((entry) => entry.name), ['release-notes.txt']);
+
+  const comparisonResponse = await fetch(
+    `${baseUrl}/compare?${new URLSearchParams({ beforeId: before.id, afterId: after.id })}`,
+    { headers }
+  );
+  assert.equal(comparisonResponse.status, 200);
+  const comparison = await comparisonResponse.json();
+  assert.equal(comparison.delta.fileCount, 1);
+
+  const activateResponse = await fetch(`${baseUrl}/history/activate`, {
+    method: 'POST',
+    headers: {
+      ...headers,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ id: before.id })
+  });
+  assert.equal(activateResponse.status, 200);
+  const resultResponse = await fetch(`${baseUrl}/result`, { headers });
+  const result = await resultResponse.json();
+  assert.equal(result.children.some((entry) => entry.name === 'release-notes.txt'), false);
 });
 
 test('ScanManager cancels a running native process and removes partial output', async (context) => {

@@ -4,34 +4,28 @@
 #include <stdint.h>
 #include <stddef.h>
 
-typedef enum NodeType {
-    NODE_FILE = 1,
-    NODE_DIRECTORY = 2
-} NodeType;
-
-typedef struct Node {
-    char *name;
-    uint64_t size;
-    uint64_t direct_file_size;
-    uint64_t file_count;
-    uint64_t directory_count;
-    NodeType type;
-    int cloud_only;
-    struct Node **children;
-    size_t child_count;
-    size_t child_capacity;
-} Node;
-
 typedef struct ScanStats {
     uint64_t files_scanned;
     uint64_t directories_scanned;
     uint64_t bytes_discovered;
+    uint64_t logical_bytes_discovered;
+    uint64_t cloud_only_files;
+    uint64_t symlinks_skipped;
+    uint64_t unreadable_directories;
+    uint64_t excluded_directories;
+    uint64_t hardlink_duplicates;
+    uint64_t hardlink_bytes_saved;
+    uint64_t clone_duplicates;
+    uint64_t clone_bytes_saved;
+    uint64_t shared_block_files;
 } ScanStats;
 
 typedef struct ScanOptions {
     int skip_caches;
     int skip_external_volumes;
     int skip_system_folders;
+    const char **excluded_paths;
+    size_t excluded_path_count;
     const char *database_path;
 } ScanOptions;
 

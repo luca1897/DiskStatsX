@@ -4,8 +4,10 @@ const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { HistoryStore } = require('./history-store');
 
 const MAX_QUERY_OUTPUT_BYTES = 32 * 1024 * 1024;
+const MAX_SEARCH_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 const INITIAL_STATUS = {
   state: 'idle',
@@ -13,15 +15,29 @@ const INITIAL_STATUS = {
   filesScanned: 0,
   directoriesScanned: 0,
   bytesDiscovered: 0,
+  logicalBytesDiscovered: 0,
+  cloudOnlyFiles: 0,
+  symlinksSkipped: 0,
+  unreadableDirectories: 0,
+  excludedDirectories: 0,
+  hardlinkDuplicates: 0,
+  hardlinkBytesSaved: 0,
+  cloneDuplicates: 0,
+  cloneBytesSaved: 0,
+  sharedBlockFiles: 0,
   elapsedMs: 0,
   error: null
 };
 
 class ScanManager extends EventEmitter {
-  constructor({ scannerPath, resultPath }) {
+  constructor({ scannerPath, resultPath, historyPath, historyLimit = 12 }) {
     super();
     this.scannerPath = scannerPath;
-    this.resultPath = resultPath;
+    this.workingPath = resultPath;
+    this.history = new HistoryStore(
+      historyPath || path.join(path.dirname(resultPath), 'history'),
+      { limit: historyLimit }
+    );
     this.process = null;
     this.startedAt = null;
     this.finishedAt = null;
@@ -29,7 +45,10 @@ class ScanManager extends EventEmitter {
     this.resultReady = false;
     this.resultBytes = 0;
     this.cancelRequested = false;
+    this.activeSnapshot = null;
+    this.activeResultPath = null;
     this.status = { ...INITIAL_STATUS };
+    this.restoreLatestSnapshot();
     this.heartbeat = setInterval(() => {
       if (this.process) {
         this.publish('progress');
@@ -47,12 +66,14 @@ class ScanManager extends EventEmitter {
       ...this.status,
       elapsedMs: this.elapsedMs(),
       resultReady: this.resultReady,
-      resultBytes: this.resultBytes
+      resultBytes: this.resultBytes,
+      snapshotId: this.activeSnapshot?.id || null,
+      historyCount: this.history.list().length
     };
   }
 
   get canServeResult() {
-    return this.resultReady && fs.existsSync(this.resultPath);
+    return this.resultReady && Boolean(this.activeResultPath) && fs.existsSync(this.activeResultPath);
   }
 
   start(rootPath, filters) {
@@ -67,28 +88,27 @@ class ScanManager extends EventEmitter {
     }
 
     this.reset(rootPath, filters);
-    const scannerArgs = this.scannerArguments(rootPath, filters);
-
-    this.process = spawn(this.scannerPath, scannerArgs, {
+    this.process = spawn(this.scannerPath, this.scannerArguments(rootPath, filters), {
       cwd: path.dirname(this.scannerPath),
       stdio: ['ignore', 'ignore', 'pipe']
     });
     const child = this.process;
-
     child.stderr.on('data', (chunk) => this.consumeProgress(chunk.toString('utf8')));
     child.on('error', (error) => {
-      this.finishedAt = Date.now();
-      if (this.process === child) {
-        this.process = null;
+      if (this.process !== child) {
+        return;
       }
+      this.finishedAt = Date.now();
+      this.process = null;
+      this.resultReady = false;
+      this.resultBytes = 0;
+      removeDatabase(this.workingPath);
       this.publish('scan-error', { state: 'error', error: error.message });
     });
-    child.on('close', (code, signal) => {
-      this.handleClose({ child, code, signal });
-    });
+    child.on('close', (code, signal) => this.handleClose({ child, code, signal }));
 
     this.publish('started');
-    return this.status;
+    return this.snapshot;
   }
 
   cancel() {
@@ -112,6 +132,76 @@ class ScanManager extends EventEmitter {
     this.stop();
   }
 
+  listHistory() {
+    return this.history.list().map((record) => ({
+      ...record,
+      active: record.id === this.activeSnapshot?.id
+    }));
+  }
+
+  activateHistory(id) {
+    if (this.process) {
+      throw createHttpError(409, 'cannot switch snapshots while scanning');
+    }
+    const record = this.history.find(id);
+    const databasePath = this.history.databasePath(record);
+    if (!record || !databasePath) {
+      throw createHttpError(404, 'scan snapshot is not available');
+    }
+    this.activateRecord(record, databasePath);
+    this.publish('history-activated', { state: 'done', error: null });
+    return this.snapshot;
+  }
+
+  readDirectory(requestedPath) {
+    this.requireResult();
+    const targetPath = requestedPath || this.status.rootPath;
+    return this.runScannerJson(
+      ['--query', this.activeResultPath, targetPath],
+      MAX_QUERY_OUTPUT_BYTES
+    );
+  }
+
+  search(options = {}) {
+    this.requireResult();
+    const args = ['--search', this.activeResultPath, String(options.term || '')];
+    appendSearchOption(args, '--extension', options.extension);
+    appendSearchOption(args, '--min-size', options.minSize);
+    appendSearchOption(args, '--max-size', options.maxSize);
+    appendSearchOption(args, '--modified-after', options.modifiedAfter);
+    appendSearchOption(args, '--modified-before', options.modifiedBefore);
+    if (options.cloudOnly === true) {
+      args.push('--cloud-only');
+    }
+    if (options.sharedBlocks === true) {
+      args.push('--shared-blocks');
+    }
+    appendSearchOption(args, '--limit', Math.min(500, Math.max(1, Number(options.limit) || 200)));
+    return this.runScannerJson(args, MAX_SEARCH_OUTPUT_BYTES);
+  }
+
+  cleanup(options = {}) {
+    this.requireResult();
+    const args = ['--cleanup', this.activeResultPath];
+    appendSearchOption(args, '--older-than-days', Math.max(0, Number(options.olderThanDays) || 30));
+    appendSearchOption(args, '--limit', Math.min(300, Math.max(1, Number(options.limit) || 150)));
+    return this.runScannerJson(args, MAX_SEARCH_OUTPUT_BYTES);
+  }
+
+  compare(beforeId, afterId) {
+    const before = this.history.find(beforeId);
+    const after = this.history.find(afterId);
+    const beforePath = this.history.databasePath(before);
+    const afterPath = this.history.databasePath(after);
+    if (!before || !after || !beforePath || !afterPath) {
+      throw createHttpError(404, 'one or both scan snapshots are not available');
+    }
+    if (before.rootPath !== after.rootPath) {
+      throw createHttpError(400, 'choose snapshots of the same root folder');
+    }
+    return this.runScannerJson(['--compare', beforePath, afterPath], MAX_SEARCH_OUTPUT_BYTES);
+  }
+
   scannerExists() {
     try {
       fs.accessSync(this.scannerPath, fs.constants.X_OK);
@@ -122,7 +212,7 @@ class ScanManager extends EventEmitter {
   }
 
   scannerArguments(rootPath, filters) {
-    const args = [rootPath, '--database', this.resultPath];
+    const args = [rootPath, '--database', this.workingPath];
     if (filters.caches) {
       args.push('--skip-caches');
     }
@@ -132,13 +222,14 @@ class ScanManager extends EventEmitter {
     if (filters.systemFolders) {
       args.push('--skip-system-folders');
     }
+    for (const excludedPath of filters.exclusions || []) {
+      args.push('--exclude', excludedPath);
+    }
     return args;
   }
 
   reset(rootPath, filters) {
-    fs.rmSync(this.resultPath, { force: true });
-    fs.rmSync(`${this.resultPath}-shm`, { force: true });
-    fs.rmSync(`${this.resultPath}-wal`, { force: true });
+    removeDatabase(this.workingPath);
     this.startedAt = Date.now();
     this.finishedAt = null;
     this.stderrBuffer = '';
@@ -199,11 +290,24 @@ class ScanManager extends EventEmitter {
       filesScanned: Number(payload.filesScanned || 0),
       directoriesScanned: Number(payload.directoriesScanned || 0),
       bytesDiscovered: Number(payload.bytesDiscovered || 0),
+      logicalBytesDiscovered: Number(payload.logicalBytesDiscovered || 0),
+      cloudOnlyFiles: Number(payload.cloudOnlyFiles || 0),
+      symlinksSkipped: Number(payload.symlinksSkipped || 0),
+      unreadableDirectories: Number(payload.unreadableDirectories || 0),
+      excludedDirectories: Number(payload.excludedDirectories || 0),
+      hardlinkDuplicates: Number(payload.hardlinkDuplicates || 0),
+      hardlinkBytesSaved: Number(payload.hardlinkBytesSaved || 0),
+      cloneDuplicates: Number(payload.cloneDuplicates || 0),
+      cloneBytesSaved: Number(payload.cloneBytesSaved || 0),
+      sharedBlockFiles: Number(payload.sharedBlockFiles || 0),
       error: null
     });
   }
 
   handleClose({ child, code, signal }) {
+    if (this.process !== child) {
+      return;
+    }
     const wasCanceled = this.cancelRequested;
     this.cancelRequested = false;
     this.finishedAt = Date.now();
@@ -218,39 +322,78 @@ class ScanManager extends EventEmitter {
     if (wasCanceled) {
       this.resultReady = false;
       this.resultBytes = 0;
-      fs.rmSync(this.resultPath, { force: true });
+      removeDatabase(this.workingPath);
       this.publish('canceled', { state: 'canceled', error: null });
-    } else if (code === 0) {
-      try {
-        this.resultBytes = fs.statSync(this.resultPath).size;
-      } catch (error) {
-        this.resultReady = false;
-        this.publish('scan-error', {
-          state: 'error',
-          error: `could not finalize scan index: ${error.message}`
-        });
-        return;
-      }
-      this.resultReady = true;
-      this.publish('done', { state: 'done', error: null });
-    } else {
+      return;
+    }
+    if (code !== 0) {
       this.resultReady = false;
       this.resultBytes = 0;
-      fs.rmSync(this.resultPath, { force: true });
+      removeDatabase(this.workingPath);
       const error = signal
         ? `scanner terminated by ${signal}`
         : `scanner exited with code ${code}`;
       this.publish('scan-error', { state: 'error', error });
+      return;
+    }
+
+    try {
+      const resultBytes = fs.statSync(this.workingPath).size;
+      const record = this.history.add(this.workingPath, this.snapshot, resultBytes);
+      this.activateRecord(record, record.databasePath);
+      this.publish('done', { state: 'done', error: null });
+    } catch (error) {
+      this.resultReady = false;
+      this.resultBytes = 0;
+      removeDatabase(this.workingPath);
+      this.publish('scan-error', {
+        state: 'error',
+        error: `could not persist scan snapshot: ${error.message}`
+      });
     }
   }
 
-  readDirectory(requestedPath) {
+  restoreLatestSnapshot() {
+    const latest = this.history.latest();
+    const databasePath = this.history.databasePath(latest);
+    if (latest && databasePath) {
+      this.activateRecord(latest, databasePath);
+    }
+  }
+
+  activateRecord(record, databasePath) {
+    this.activeSnapshot = record;
+    this.activeResultPath = databasePath;
+    this.resultReady = true;
+    this.resultBytes = Number(record.resultBytes || fs.statSync(databasePath).size || 0);
+    const finishedAt = Date.parse(record.createdAt) || Date.now();
+    this.finishedAt = finishedAt;
+    this.startedAt = finishedAt - Number(record.elapsedMs || 0);
+    this.status = {
+      ...INITIAL_STATUS,
+      state: 'done',
+      rootPath: record.rootPath,
+      currentPath: record.rootPath,
+      filters: record.filters || {},
+      filesScanned: Number(record.filesScanned || 0),
+      directoriesScanned: Number(record.directoriesScanned || 0),
+      bytesDiscovered: Number(record.allocatedBytes || 0),
+      logicalBytesDiscovered: Number(record.logicalBytes || 0),
+      ...(record.scanSummary || {}),
+      elapsedMs: Number(record.elapsedMs || 0),
+      error: null
+    };
+  }
+
+  requireResult() {
     if (!this.canServeResult) {
       throw createHttpError(this.isRunning ? 202 : 404, 'no scan result available');
     }
-    const targetPath = requestedPath || this.status.rootPath;
+  }
+
+  runScannerJson(args, maxBytes) {
     return new Promise((resolve, reject) => {
-      const query = spawn(this.scannerPath, ['--query', this.resultPath, targetPath], {
+      const query = spawn(this.scannerPath, args, {
         cwd: path.dirname(this.scannerPath),
         stdio: ['ignore', 'pipe', 'pipe']
       });
@@ -258,13 +401,12 @@ class ScanManager extends EventEmitter {
       const errors = [];
       let outputBytes = 0;
       let rejected = false;
-
       query.stdout.on('data', (chunk) => {
         outputBytes += chunk.length;
-        if (outputBytes > MAX_QUERY_OUTPUT_BYTES) {
+        if (outputBytes > maxBytes) {
           rejected = true;
           query.kill('SIGTERM');
-          reject(createHttpError(413, 'directory view is too large'));
+          reject(createHttpError(413, 'native query output is too large'));
           return;
         }
         output.push(chunk);
@@ -281,17 +423,30 @@ class ScanManager extends EventEmitter {
         }
         if (code !== 0) {
           const message = Buffer.concat(errors).toString('utf8').trim();
-          reject(createHttpError(404, message || 'directory is not available'));
+          reject(createHttpError(404, message || 'native query failed'));
           return;
         }
         try {
           resolve(JSON.parse(Buffer.concat(output).toString('utf8')));
         } catch {
-          reject(createHttpError(500, 'scanner returned an invalid directory view'));
+          reject(createHttpError(500, 'scanner returned invalid JSON'));
         }
       });
     });
   }
+}
+
+function appendSearchOption(args, flag, value) {
+  if (value === undefined || value === null || value === '') {
+    return;
+  }
+  args.push(flag, String(value));
+}
+
+function removeDatabase(databasePath) {
+  fs.rmSync(databasePath, { force: true });
+  fs.rmSync(`${databasePath}-shm`, { force: true });
+  fs.rmSync(`${databasePath}-wal`, { force: true });
 }
 
 function createHttpError(statusCode, message) {

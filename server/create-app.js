@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const express = require('express');
+const path = require('path');
 const { URL } = require('url');
 const { runSystemAction } = require('./system-actions');
 const { SseHub } = require('./sse-hub');
@@ -11,11 +12,47 @@ const SESSION_COOKIE = 'diskstatsx_session';
 
 function normalizeFilters(value) {
   const filters = value && typeof value === 'object' ? value : {};
+  const exclusions = Array.isArray(filters.exclusions)
+    ? filters.exclusions
+        .filter((entry) => typeof entry === 'string')
+        .map((entry) => entry.trim())
+        .filter((entry) => path.isAbsolute(entry))
+        .map((entry) => path.resolve(entry))
+        .slice(0, 100)
+    : [];
   return {
     caches: filters.caches === true,
     externalVolumes: filters.externalVolumes === true,
-    systemFolders: filters.systemFolders === true
+    systemFolders: filters.systemFolders === true,
+    exclusions
   };
+}
+
+function normalizeSearch(value) {
+  const query = value && typeof value === 'object' ? value : {};
+  return {
+    term: typeof query.term === 'string' ? query.term.trim().slice(0, 240) : '',
+    extension: typeof query.extension === 'string'
+      ? query.extension.trim().slice(0, 32)
+      : '',
+    minSize: nonNegativeNumber(query.minSize),
+    maxSize: nonNegativeNumber(query.maxSize),
+    modifiedAfter: signedNumber(query.modifiedAfter),
+    modifiedBefore: signedNumber(query.modifiedBefore),
+    cloudOnly: query.cloudOnly === true || query.cloudOnly === 'true',
+    sharedBlocks: query.sharedBlocks === true || query.sharedBlocks === 'true',
+    limit: Math.min(500, Math.max(1, Number(query.limit) || 200))
+  };
+}
+
+function nonNegativeNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+}
+
+function signedNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
 }
 
 function createApp({ scanManager, defaultScanPath = '/', publicPath, vendorPath }) {
@@ -72,6 +109,47 @@ function createApp({ scanManager, defaultScanPath = '/', publicPath, vendorPath 
         ? request.query.path
         : scanManager.snapshot.rootPath;
       response.json(await scanManager.readDirectory(requestedPath));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/history', requireSession(sessionToken), (_request, response) => {
+    response.json({ snapshots: scanManager.listHistory() });
+  });
+
+  app.post('/history/activate', requireSession(sessionToken), (request, response) => {
+    try {
+      const id = typeof request.body.id === 'string' ? request.body.id : '';
+      response.json({ ok: true, status: scanManager.activateHistory(id) });
+    } catch (error) {
+      response.status(error.statusCode || 500).json({ error: error.message });
+    }
+  });
+
+  app.get('/compare', requireSession(sessionToken), async (request, response, next) => {
+    try {
+      const beforeId = typeof request.query.beforeId === 'string' ? request.query.beforeId : '';
+      const afterId = typeof request.query.afterId === 'string' ? request.query.afterId : '';
+      response.json(await scanManager.compare(beforeId, afterId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/search', requireSession(sessionToken), async (request, response, next) => {
+    try {
+      response.json(await scanManager.search(normalizeSearch(request.query)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/cleanup', requireSession(sessionToken), async (request, response, next) => {
+    try {
+      const olderThanDays = Math.min(36500, Math.max(0, Number(request.query.olderThanDays) || 30));
+      const limit = Math.min(300, Math.max(1, Number(request.query.limit) || 150));
+      response.json(await scanManager.cleanup({ olderThanDays, limit }));
     } catch (error) {
       next(error);
     }
@@ -181,6 +259,7 @@ function safeTokenEqual(candidate, expected) {
 module.exports = {
   createApp,
   normalizeFilters,
+  normalizeSearch,
   parseHost,
   validateLocalRequest
 };

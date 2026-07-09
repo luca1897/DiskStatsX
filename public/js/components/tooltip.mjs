@@ -12,10 +12,15 @@ export class Tooltip {
     const storageNote = node.data.cloudOnly
       ? '<div class="muted">iCloud placeholder · no local data allocated</div>'
       : '';
+    const allocationNotes = this.#allocationNotes(node.data);
     this.#setContent(node.data.path, `
       <strong>${escapeHtml(node.data.name || node.data.path)}</strong>
-      <div>${formatSize(value)} · ${percent.toFixed(percent >= 1 ? 1 : 2)}%</div>
+      <div>${formatSize(value)} allocated · ${percent.toFixed(percent >= 1 ? 1 : 2)}%</div>
+      ${node.data.logicalSize != null
+        ? `<div class="muted">${formatSize(node.data.logicalSize)} logical</div>`
+        : ''}
       ${storageNote}
+      ${allocationNotes}
       <div class="muted">${escapeHtml(node.data.path || '')}</div>
     `);
     this.#position(event);
@@ -29,8 +34,12 @@ export class Tooltip {
       : '';
     this.#setContent(`${item.path}:${item.size}`, `
       <strong>${escapeHtml(item.name)}</strong>
-      <div>${formatSize(item.size)} · ${percent.toFixed(percent >= 1 ? 1 : 2)}%</div>
+      <div>${formatSize(item.size)} allocated · ${percent.toFixed(percent >= 1 ? 1 : 2)}%</div>
+      ${item.logicalSize
+        ? `<div class="muted">${formatSize(item.logicalSize)} logical</div>`
+        : ''}
       ${storageNote}
+      ${this.#allocationNotes(item.sourceNode?.data || item)}
       <div class="muted">${escapeHtml(path)}</div>
       <div class="muted">${escapeHtml(item.extension)} · ${escapeHtml(extensionDescription(item.extension))}</div>
     `);
@@ -40,6 +49,19 @@ export class Tooltip {
   hide() {
     this.element.style.display = 'none';
     this.contentKey = null;
+  }
+
+  #allocationNotes(data) {
+    if (data.hardlinkDuplicate) {
+      return '<div class="muted">Hard link · allocation counted at another path</div>';
+    }
+    if (data.cloneDuplicate) {
+      return '<div class="muted">Full APFS clone · shared allocation counted once</div>';
+    }
+    if (data.sharedBlocks) {
+      return '<div class="muted">Shares APFS blocks · physical allocation is estimated</div>';
+    }
+    return '';
   }
 
   #setContent(key, html) {
