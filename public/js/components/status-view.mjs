@@ -3,6 +3,8 @@ import { formatCount, formatElapsed, formatSize } from '../core/format.mjs';
 export class StatusView {
   constructor(elements) {
     this.elements = elements;
+    this.detailsSignature = '';
+    this.pendingDetails = null;
     this.bind();
   }
 
@@ -29,7 +31,14 @@ export class StatusView {
     logicalSize.textContent = formatSize(
       summary.logicalBytes ?? summary.logicalBytesDiscovered ?? treeSize
     );
-    this.renderDetails(summary, status.bytesDiscovered || treeSize);
+    this.pendingDetails = {
+      summary,
+      fallbackAllocated: status.bytesDiscovered || treeSize
+    };
+    this.updateDetailsButton(summary);
+    if (!this.elements.scanDetails.hidden) {
+      this.renderDetails(summary, status.bytesDiscovered || treeSize);
+    }
 
     const scanActive = status.state === 'running' || status.state === 'canceling';
     scanButton.disabled = scanActive;
@@ -47,16 +56,20 @@ export class StatusView {
       canceling: 'Canceling scan...',
       error: status.error || 'Scan failed'
     };
+    const phaseLabels = {
+      indexing: 'Indexing folders',
+      'search-index': 'Building search index',
+      optimizing: 'Optimizing database',
+      ready: 'Finishing scan'
+    };
     toolbarState.textContent = status.state === 'running'
-      ? status.currentPath || 'Scanning'
+      ? phaseLabels[status.phase] || status.currentPath || 'Scanning'
       : labels[status.state] || 'Idle';
+    toolbarState.title = status.currentPath || toolbarState.textContent;
+    pathInput.title = pathInput.value;
   }
 
-  renderDetails(summary, fallbackAllocated) {
-    const allocated = Number(summary.allocatedBytes ?? fallbackAllocated ?? 0);
-    const logical = Number(
-      summary.logicalBytes ?? summary.logicalBytesDiscovered ?? allocated
-    );
+  updateDetailsButton(summary) {
     const estimate = Boolean(
       summary.allocationIsEstimate || Number(summary.sharedBlockFiles || 0) > 0
     );
@@ -64,6 +77,33 @@ export class StatusView {
     this.elements.scanDetailsButton.textContent = estimate
       ? 'Estimated allocation'
       : 'Scan details';
+  }
+
+  renderDetails(summary, fallbackAllocated) {
+    const allocated = Number(summary.allocatedBytes ?? fallbackAllocated ?? 0);
+    const logical = Number(
+      summary.logicalBytes ?? summary.logicalBytesDiscovered ?? allocated
+    );
+    const signature = [
+      allocated,
+      logical,
+      summary.hardlinkDuplicates,
+      summary.hardlinkBytesSaved,
+      summary.cloneDuplicates,
+      summary.cloneBytesSaved,
+      summary.sharedBlockFiles,
+      summary.cloudOnlyFiles,
+      summary.excludedDirectories,
+      summary.unreadableDirectories,
+      summary.symlinksSkipped
+    ].map((value) => Number(value || 0)).join(':');
+    if (signature === this.detailsSignature) {
+      return;
+    }
+    this.detailsSignature = signature;
+    const estimate = Boolean(
+      summary.allocationIsEstimate || Number(summary.sharedBlockFiles || 0) > 0
+    );
     const rows = [
       ['Local allocated', formatSize(allocated)],
       ['Logical size', formatSize(logical)],
@@ -109,6 +149,12 @@ export class StatusView {
       const open = this.elements.scanDetails.hidden;
       this.elements.scanDetails.hidden = !open;
       this.elements.scanDetailsButton.setAttribute('aria-expanded', String(open));
+      if (open && this.pendingDetails) {
+        this.renderDetails(
+          this.pendingDetails.summary,
+          this.pendingDetails.fallbackAllocated
+        );
+      }
     });
     document.addEventListener('pointerdown', (event) => {
       if (

@@ -10,7 +10,9 @@ export class TreemapView {
     extensionColor,
     tooltip,
     onAnalyze,
+    onNavigatePath,
     onSelect,
+    onHover,
     onContextMenu,
     onMessage
   }) {
@@ -18,12 +20,15 @@ export class TreemapView {
     this.extensionColor = extensionColor;
     this.tooltip = tooltip;
     this.onAnalyze = onAnalyze;
+    this.onNavigatePath = onNavigatePath;
     this.onSelect = onSelect;
+    this.onHover = onHover;
     this.onContextMenu = onContextMenu;
     this.onMessage = onMessage;
     this.root = null;
     this.scope = null;
     this.selectedPath = null;
+    this.hoveredPath = null;
     this.highlightedExtension = null;
     this.tiles = [];
     this.renderItems = [];
@@ -31,9 +36,10 @@ export class TreemapView {
     this.hoveredTile = null;
     this.itemCache = new WeakMap();
     this.hoverFrame = 0;
+    this.resizeFrame = 0;
     this.pendingPointer = null;
     this.worker = null;
-    this.resizeObserver = new ResizeObserver(() => this.render());
+    this.resizeObserver = new ResizeObserver(() => this.scheduleRender());
     this.initializeWorker();
     this.bind();
   }
@@ -43,16 +49,23 @@ export class TreemapView {
     this.scope = root;
     this.itemCache = new WeakMap();
     this.resizeObserver.observe(this.elements.treemapCanvas);
+    this.renderNavigation();
     this.render();
   }
 
   setScope(node) {
     this.scope = node;
+    this.renderNavigation();
     this.render();
   }
 
   setSelectedPath(path) {
     this.selectedPath = path;
+    this.drawOverlay();
+  }
+
+  setHoveredPath(path) {
+    this.hoveredPath = path;
     this.drawOverlay();
   }
 
@@ -62,16 +75,112 @@ export class TreemapView {
   }
 
   clear() {
+    if (this.resizeFrame) {
+      window.cancelAnimationFrame(this.resizeFrame);
+      this.resizeFrame = 0;
+    }
+    if (this.hoverFrame) {
+      window.cancelAnimationFrame(this.hoverFrame);
+      this.hoverFrame = 0;
+    }
+    this.pendingPointer = null;
+    this.hoveredTile = null;
     this.renderId++;
     this.root = null;
     this.scope = null;
     this.tiles = [];
     this.renderItems = [];
+    this.hoveredPath = null;
     this.itemCache = new WeakMap();
     this.elements.treemapCanvas.dataset.tileCount = '0';
     this.elements.treemapCanvas.dataset.aggregatedFileCount = '0';
+    this.elements.treemapNavigation.hidden = true;
+    this.elements.treemapBreadcrumb.replaceChildren();
     this.worker?.postMessage({ type: 'clear' });
     this.drawOverlay();
+  }
+
+  scheduleRender() {
+    if (this.resizeFrame) {
+      return;
+    }
+    this.resizeFrame = requestAnimationFrame(() => {
+      this.resizeFrame = 0;
+      this.render();
+    });
+  }
+
+  parentTarget() {
+    if (this.scope?.parent) {
+      return { node: this.scope.parent, path: this.scope.parent.data.path };
+    }
+    if (this.scope?.data.parentPath) {
+      return { node: null, path: this.scope.data.parentPath };
+    }
+    return null;
+  }
+
+  navigateUp() {
+    const target = this.parentTarget();
+    if (!target) {
+      return;
+    }
+    if (target.node) {
+      this.onAnalyze(target.node);
+    } else {
+      this.onNavigatePath(target.path);
+    }
+  }
+
+  renderNavigation() {
+    const { treemapNavigation, treemapUpButton, treemapBreadcrumb } = this.elements;
+    if (!this.scope || !this.root) {
+      treemapNavigation.hidden = true;
+      treemapBreadcrumb.replaceChildren();
+      return;
+    }
+
+    treemapNavigation.hidden = false;
+    const parent = this.parentTarget();
+    treemapUpButton.disabled = !parent;
+    treemapUpButton.title = parent ? `Go to ${parent.path}` : 'Root folder';
+
+    const parts = this.scope === this.root && this.root.data.breadcrumbs?.length
+      ? this.root.data.breadcrumbs.map((data) => ({ data, node: null }))
+      : this.scope.ancestors().reverse().map((node) => ({ data: node.data, node }));
+    const fragment = document.createDocumentFragment();
+    for (let index = 0; index < parts.length; index++) {
+      if (index > 0) {
+        const separator = document.createElement('span');
+        separator.className = 'treemap-crumb-separator';
+        separator.textContent = '›';
+        fragment.appendChild(separator);
+      }
+      const part = parts[index];
+      const label = part.data.name || part.data.path || '/';
+      if (index === parts.length - 1) {
+        const current = document.createElement('span');
+        current.className = 'treemap-crumb current';
+        current.title = part.data.path || '';
+        current.textContent = label;
+        fragment.appendChild(current);
+        continue;
+      }
+      const button = document.createElement('button');
+      button.className = 'treemap-crumb';
+      button.type = 'button';
+      button.title = part.data.path || '';
+      button.textContent = label;
+      button.addEventListener('click', () => {
+        if (part.node) {
+          this.onAnalyze(part.node);
+        } else {
+          this.onNavigatePath(part.data.path);
+        }
+      });
+      fragment.appendChild(button);
+    }
+    treemapBreadcrumb.replaceChildren(fragment);
   }
 
   render() {
@@ -329,7 +438,7 @@ export class TreemapView {
     context.clearRect(0, 0, width, height);
     for (const tile of this.tiles) {
       const selected = tile.item.path === this.selectedPath;
-      const hovered = tile === this.hoveredTile;
+      const hovered = tile === this.hoveredTile || tile.item.path === this.hoveredPath;
       if (!selected && !hovered) {
         continue;
       }
@@ -360,6 +469,7 @@ export class TreemapView {
 
   bind() {
     const overlay = this.elements.treemapOverlay;
+    this.elements.treemapUpButton.addEventListener('click', () => this.navigateUp());
     overlay.addEventListener('mousemove', (event) => {
       this.pendingPointer = { clientX: event.clientX, clientY: event.clientY };
       if (this.hoverFrame) {
@@ -376,6 +486,7 @@ export class TreemapView {
           if (this.hoveredTile) {
             this.hoveredTile = null;
             this.drawOverlay();
+            this.onHover(null);
           }
           this.tooltip.hide();
           overlay.style.cursor = 'default';
@@ -385,6 +496,7 @@ export class TreemapView {
         if (this.hoveredTile !== tile) {
           this.hoveredTile = tile;
           this.drawOverlay();
+          this.onHover(tile.item.synthetic ? null : tile.item.path);
         }
         this.tooltip.showTreemapItem(pointer, tile.item, this.scope?.value || 1);
       });
@@ -393,6 +505,7 @@ export class TreemapView {
     overlay.addEventListener('mouseleave', () => {
       this.pendingPointer = null;
       this.hoveredTile = null;
+      this.onHover(null);
       this.tooltip.hide();
       this.drawOverlay();
     });

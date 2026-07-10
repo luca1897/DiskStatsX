@@ -263,6 +263,46 @@ printf '{"name":"tmp","path":"/tmp","size":0,"type":"directory","children":[]}\\
   await assert.rejects(fs.access(resultPath));
 });
 
+test('ScanManager terminates an obsolete native query when its signal is aborted', async (context) => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'diskstatsx-query-cancel-'));
+  const scannerPath = path.join(temporaryDirectory, 'slow-query');
+  const markerPath = path.join(temporaryDirectory, 'terminated');
+  const readyPath = path.join(temporaryDirectory, 'ready');
+  await fs.writeFile(scannerPath, `#!/usr/bin/env node
+'use strict';
+const fs = require('node:fs');
+process.on('SIGTERM', () => {
+  fs.writeFileSync(process.argv[2], 'terminated');
+  process.exit(143);
+});
+fs.writeFileSync(process.argv[3], 'ready');
+setTimeout(() => process.stdout.write('{}\\n'), 10000);
+`);
+  await fs.chmod(scannerPath, 0o755);
+
+  const manager = new ScanManager({
+    scannerPath,
+    resultPath: path.join(temporaryDirectory, 'result.sqlite')
+  });
+  context.after(async () => {
+    manager.dispose();
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  const controller = new globalThis.AbortController();
+  const query = manager.runScannerJson([markerPath, readyPath], 1024, {
+    signal: controller.signal
+  });
+  await waitForFile(readyPath);
+  controller.abort();
+
+  await assert.rejects(query, (error) => (
+    error.statusCode === 499 && error.message === 'native query canceled'
+  ));
+  await waitForFile(markerPath);
+  assert.equal(await fs.readFile(markerPath, 'utf8'), 'terminated');
+});
+
 function waitForStatus(manager, expectedState, timeoutMs = 5000) {
   if (manager.snapshot.state === expectedState) {
     return Promise.resolve(manager.snapshot);
@@ -307,4 +347,17 @@ function requestWithHeaders(port, requestPath, headers) {
     request.on('error', reject);
     request.end();
   });
+}
+
+async function waitForFile(filePath, timeoutMs = 1000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      await fs.access(filePath);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error(`Timed out waiting for file: ${filePath}`);
 }

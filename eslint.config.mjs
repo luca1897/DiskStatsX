@@ -55,7 +55,7 @@ export default [
     }
   },
   {
-    files: ['*.js', 'server/**/*.js', 'test/**/*.js'],
+    files: ['*.js', 'server/**/*.js', 'scripts/**/*.js', 'test/**/*.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'commonjs',

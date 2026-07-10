@@ -36,6 +36,8 @@
 #define QUERY_EXPANDED_DIRECTORY_LIMIT 24
 #define QUERY_SECOND_LEVEL_DIRECTORY_LIMIT 32
 #define QUERY_SECOND_LEVEL_FILE_LIMIT 48
+#define GLOBAL_LARGEST_FILE_LIMIT 10
+#define BRANCH_LARGEST_FILE_LIMIT 3
 
 typedef struct EntryAttrs {
     const char *name;
@@ -89,12 +91,32 @@ typedef struct DirectoryAggregate {
     uint64_t direct_directory_count;
 } DirectoryAggregate;
 
+typedef struct LargestFile {
+    char *name;
+    char *path;
+    uint64_t size;
+    uint64_t logical_size;
+    uint64_t allocated_size;
+    bool cloud_only;
+} LargestFile;
+
+typedef struct BranchLargestFiles {
+    sqlite3_int64 root_branch_id;
+    LargestFile files[BRANCH_LARGEST_FILE_LIMIT];
+    size_t count;
+} BranchLargestFiles;
+
 typedef struct ScanDatabase {
     sqlite3 *handle;
     sqlite3_stmt *insert_directory;
     sqlite3_stmt *update_directory;
     sqlite3_stmt *insert_file;
     sqlite3_stmt *insert_metadata;
+    LargestFile largest_files[GLOBAL_LARGEST_FILE_LIMIT];
+    size_t largest_file_count;
+    BranchLargestFiles *branch_largest_files;
+    size_t branch_largest_count;
+    size_t branch_largest_capacity;
 } ScanDatabase;
 
 typedef struct SearchOptions {
@@ -139,6 +161,7 @@ typedef struct DirectoryRowList {
 
 static ScanStats g_stats = {0};
 static uint64_t g_last_progress_ms = 0;
+static const char *g_progress_phase = "scanning";
 static IdentitySet g_hardlinks = {0};
 static IdentitySet g_clones = {0};
 
@@ -247,6 +270,140 @@ static char *xstrdup(const char *s) {
         die("out of memory");
     }
     return copy;
+}
+
+static void largest_file_free(LargestFile *file) {
+    free(file->name);
+    free(file->path);
+    *file = (LargestFile){0};
+}
+
+static bool largest_file_precedes(uint64_t size,
+                                  const char *name,
+                                  const char *path,
+                                  const LargestFile *other) {
+    if (size != other->size) {
+        return size > other->size;
+    }
+    int name_order = strcmp(name, other->name);
+    if (name_order != 0) {
+        return name_order < 0;
+    }
+    return strcmp(path, other->path) < 0;
+}
+
+static void largest_files_consider(LargestFile *files,
+                                   size_t *count,
+                                   size_t limit,
+                                   const char *name,
+                                   const char *path,
+                                   uint64_t size,
+                                   uint64_t logical_size,
+                                   uint64_t allocated_size,
+                                   bool cloud_only) {
+    size_t insert_at = 0;
+    while (insert_at < *count &&
+           !largest_file_precedes(size, name, path, &files[insert_at])) {
+        insert_at++;
+    }
+    if (insert_at >= limit) {
+        return;
+    }
+
+    size_t next_count = *count < limit ? *count + 1 : *count;
+    if (*count == limit) {
+        largest_file_free(&files[limit - 1]);
+    }
+    for (size_t index = next_count - 1; index > insert_at; index--) {
+        files[index] = files[index - 1];
+    }
+    files[insert_at] = (LargestFile){
+        .name = xstrdup(name),
+        .path = xstrdup(path),
+        .size = size,
+        .logical_size = logical_size,
+        .allocated_size = allocated_size,
+        .cloud_only = cloud_only
+    };
+    *count = next_count;
+}
+
+static BranchLargestFiles *database_branch_largest(ScanDatabase *database,
+                                                    sqlite3_int64 root_branch_id) {
+    for (size_t index = database->branch_largest_count; index > 0; index--) {
+        BranchLargestFiles *branch = &database->branch_largest_files[index - 1];
+        if (branch->root_branch_id == root_branch_id) {
+            return branch;
+        }
+    }
+    if (database->branch_largest_count == database->branch_largest_capacity) {
+        size_t next_capacity = database->branch_largest_capacity
+            ? database->branch_largest_capacity * 2
+            : 32;
+        database->branch_largest_files = xrealloc(
+            database->branch_largest_files,
+            next_capacity * sizeof(BranchLargestFiles)
+        );
+        memset(database->branch_largest_files + database->branch_largest_capacity,
+               0,
+               (next_capacity - database->branch_largest_capacity) *
+                   sizeof(BranchLargestFiles));
+        database->branch_largest_capacity = next_capacity;
+    }
+    BranchLargestFiles *branch =
+        &database->branch_largest_files[database->branch_largest_count++];
+    branch->root_branch_id = root_branch_id;
+    return branch;
+}
+
+static void database_track_largest_file(ScanDatabase *database,
+                                        sqlite3_int64 root_branch_id,
+                                        const char *name,
+                                        const char *path,
+                                        uint64_t size,
+                                        uint64_t logical_size,
+                                        uint64_t allocated_size,
+                                        bool cloud_only) {
+    largest_files_consider(database->largest_files,
+                           &database->largest_file_count,
+                           GLOBAL_LARGEST_FILE_LIMIT,
+                           name,
+                           path,
+                           size,
+                           logical_size,
+                           allocated_size,
+                           cloud_only);
+    if (root_branch_id <= 0) {
+        return;
+    }
+    BranchLargestFiles *branch = database_branch_largest(database, root_branch_id);
+    largest_files_consider(branch->files,
+                           &branch->count,
+                           BRANCH_LARGEST_FILE_LIMIT,
+                           name,
+                           path,
+                           size,
+                           logical_size,
+                           allocated_size,
+                           cloud_only);
+}
+
+static void database_free_largest_files(ScanDatabase *database) {
+    for (size_t index = 0; index < database->largest_file_count; index++) {
+        largest_file_free(&database->largest_files[index]);
+    }
+    for (size_t branch_index = 0;
+         branch_index < database->branch_largest_count;
+         branch_index++) {
+        BranchLargestFiles *branch = &database->branch_largest_files[branch_index];
+        for (size_t file_index = 0; file_index < branch->count; file_index++) {
+            largest_file_free(&branch->files[file_index]);
+        }
+    }
+    free(database->branch_largest_files);
+    database->branch_largest_files = NULL;
+    database->branch_largest_count = 0;
+    database->branch_largest_capacity = 0;
 }
 
 static uint32_t read_u32(const char *p) {
@@ -423,7 +580,9 @@ static void emit_progress(const char *current_path, bool force) {
     }
     g_last_progress_ms = current_ms;
 
-    fputs("{\"currentPath\":", stderr);
+    fputs("{\"phase\":", stderr);
+    json_write_escaped(stderr, g_progress_phase);
+    fputs(",\"currentPath\":", stderr);
     json_write_escaped(stderr, current_path);
     fprintf(stderr,
             ",\"filesScanned\":%llu,\"directoriesScanned\":%llu,"
@@ -874,6 +1033,71 @@ static void database_insert_file(ScanDatabase *database,
     if (sqlite3_step(database->insert_file) != SQLITE_DONE) {
         sqlite_fail(database->handle, "could not index file");
     }
+    database_track_largest_file(database,
+                                root_branch_id,
+                                name,
+                                path,
+                                size,
+                                logical_size,
+                                allocated_size,
+                                cloud_only);
+}
+
+static void database_insert_largest_file(sqlite3_stmt *statement,
+                                         const char *scope,
+                                         sqlite3_int64 root_branch_id,
+                                         size_t rank,
+                                         const LargestFile *file) {
+    sqlite3_reset(statement);
+    sqlite3_clear_bindings(statement);
+    sqlite3_bind_text(statement, 1, scope, -1, SQLITE_STATIC);
+    if (root_branch_id > 0) {
+        sqlite3_bind_int64(statement, 2, root_branch_id);
+    } else {
+        sqlite3_bind_null(statement, 2);
+    }
+    sqlite3_bind_int(statement, 3, (int)rank);
+    sqlite3_bind_text(statement, 4, file->name, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 5, file->path, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(statement, 6, (sqlite3_int64)file->size);
+    sqlite3_bind_int64(statement, 7, (sqlite3_int64)file->logical_size);
+    sqlite3_bind_int64(statement, 8, (sqlite3_int64)file->allocated_size);
+    sqlite3_bind_int(statement, 9, file->cloud_only ? 1 : 0);
+    if (sqlite3_step(statement) != SQLITE_DONE) {
+        sqlite_fail(sqlite3_db_handle(statement), "could not write largest files summary");
+    }
+}
+
+static void database_write_largest_files(ScanDatabase *database) {
+    const char *sql =
+        "INSERT INTO largest_files("
+        "scope,root_branch_id,rank,name,path,size,logical_size,allocated_size,cloud_only"
+        ") VALUES(?,?,?,?,?,?,?,?,?)";
+    sqlite3_stmt *statement = NULL;
+    if (sqlite3_prepare_v2(database->handle, sql, -1, &statement, NULL) != SQLITE_OK) {
+        sqlite_fail(database->handle, "could not prepare largest files summary");
+    }
+    for (size_t index = 0; index < database->largest_file_count; index++) {
+        database_insert_largest_file(statement,
+                                     "global",
+                                     0,
+                                     index + 1,
+                                     &database->largest_files[index]);
+    }
+    for (size_t branch_index = 0;
+         branch_index < database->branch_largest_count;
+         branch_index++) {
+        const BranchLargestFiles *branch =
+            &database->branch_largest_files[branch_index];
+        for (size_t file_index = 0; file_index < branch->count; file_index++) {
+            database_insert_largest_file(statement,
+                                         "branch",
+                                         branch->root_branch_id,
+                                         file_index + 1,
+                                         &branch->files[file_index]);
+        }
+    }
+    sqlite3_finalize(statement);
 }
 
 static DirectoryAggregate write_scan_database(const char *database_path,
@@ -1001,7 +1225,7 @@ static DirectoryAggregate write_scan_database(const char *database_path,
     database_update_directory(&database, root_id, &root);
 
     const char *metadata[][2] = {
-        {"schema_version", "6"},
+        {"schema_version", "7"},
         {"root_path", root_path}
     };
     for (size_t i = 0; i < sizeof(metadata) / sizeof(metadata[0]); i++) {
@@ -1043,8 +1267,12 @@ static DirectoryAggregate write_scan_database(const char *database_path,
     sqlite3_finalize(database.insert_file);
     sqlite3_finalize(database.update_directory);
     sqlite3_finalize(database.insert_directory);
+
+    g_progress_phase = "indexing";
+    emit_progress(root_path, true);
     sqlite_exec_checked(database.handle,
                         "COMMIT;"
+                        "BEGIN IMMEDIATE;"
                         "CREATE UNIQUE INDEX directories_path ON directories(path);"
                         "CREATE INDEX directories_parent_size ON directories(parent_id,size DESC);"
                         "CREATE INDEX files_parent_size ON files(parent_id,size DESC);"
@@ -1052,12 +1280,6 @@ static DirectoryAggregate write_scan_database(const char *database_path,
                         "CREATE INDEX files_root_branch_size ON files(root_branch_id,size DESC);"
                         "CREATE INDEX files_name_size ON files(name COLLATE NOCASE,size DESC);"
                         "CREATE INDEX files_modified_size ON files(modified_at DESC,size DESC);"
-                        "CREATE VIRTUAL TABLE file_search USING fts5("
-                        "name,path,content='files',content_rowid='id',"
-                        "tokenize='unicode61 remove_diacritics 2'"
-                        ");"
-                        "INSERT INTO file_search(rowid,name,path) "
-                        "SELECT id,name,path FROM files;"
                         "CREATE TABLE largest_files("
                         "scope TEXT NOT NULL,"
                         "root_branch_id INTEGER,"
@@ -1069,33 +1291,44 @@ static DirectoryAggregate write_scan_database(const char *database_path,
                         "allocated_size INTEGER NOT NULL,"
                         "cloud_only INTEGER NOT NULL"
                         ");"
-                        "INSERT INTO largest_files("
-                        "scope,root_branch_id,rank,name,path,size,logical_size,allocated_size,cloud_only"
-                        ") "
-                        "SELECT 'global',NULL,ROW_NUMBER() OVER (ORDER BY size DESC,name),"
-                        "name,path,size,logical_size,allocated_size,cloud_only "
-                        "FROM files ORDER BY size DESC,name LIMIT 10;"
-                        "INSERT INTO largest_files("
-                        "scope,root_branch_id,rank,name,path,size,logical_size,allocated_size,cloud_only"
-                        ") "
-                        "SELECT 'branch',root_branch_id,rank,name,path,size,"
-                        "logical_size,allocated_size,cloud_only FROM ("
-                        "SELECT root_branch_id,name,path,size,logical_size,allocated_size,cloud_only,"
-                        "ROW_NUMBER() OVER (PARTITION BY root_branch_id ORDER BY size DESC,name) AS rank "
-                        "FROM files WHERE root_branch_id IS NOT NULL"
-                        ") WHERE rank<=3;"
                         "CREATE TABLE branch_file_summary("
                         "root_branch_id INTEGER PRIMARY KEY,"
                         "file_count INTEGER NOT NULL,"
                         "file_size INTEGER NOT NULL"
                         ");"
                         "INSERT INTO branch_file_summary(root_branch_id,file_count,file_size) "
-                        "SELECT root_branch_id,COUNT(*),TOTAL(size) FROM files "
-                        "WHERE root_branch_id IS NOT NULL GROUP BY root_branch_id;"
+                        "SELECT id,file_count,size FROM directories "
+                        "WHERE parent_id=(SELECT id FROM directories WHERE parent_id IS NULL LIMIT 1) "
+                        "AND file_count>0;",
+                        "could not build scan indexes");
+    database_write_largest_files(&database);
+    database_free_largest_files(&database);
+    sqlite_exec_checked(database.handle,
                         "CREATE INDEX largest_files_scope_branch "
                         "ON largest_files(scope,root_branch_id,rank);"
-                        "ANALYZE;",
-                        "could not finalize scan database");
+                        "COMMIT;",
+                        "could not finalize scan summaries");
+
+    g_progress_phase = "search-index";
+    emit_progress(root_path, true);
+    sqlite_exec_checked(database.handle,
+                        "BEGIN IMMEDIATE;"
+                        "CREATE VIRTUAL TABLE file_search USING fts5("
+                        "name,path,content='files',content_rowid='id',"
+                        "tokenize='unicode61 remove_diacritics 2'"
+                        ");"
+                        "INSERT INTO file_search(rowid,name,path) "
+                        "SELECT id,name,path FROM files;"
+                        "COMMIT;",
+                        "could not build search index");
+
+    g_progress_phase = "optimizing";
+    emit_progress(root_path, true);
+    sqlite_exec_checked(database.handle,
+                        "PRAGMA analysis_limit=1000;"
+                        "PRAGMA optimize;",
+                        "could not optimize scan database");
+    g_progress_phase = "ready";
     sqlite3_close(database.handle);
     return root;
 }
@@ -2176,6 +2409,7 @@ static int scan_mode(int argc, char **argv) {
 
     g_stats = (ScanStats){0};
     g_last_progress_ms = now_ms();
+    g_progress_phase = "scanning";
     emit_progress(root_path, true);
     DirectoryAggregate root = write_scan_database(options.database_path,
                                                   root_path,

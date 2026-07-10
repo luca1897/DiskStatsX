@@ -123,11 +123,9 @@ function draw() {
 function drawTile(tile, item) {
   const { x0, y0, width: tileWidth, height: tileHeight } = tile;
   const base = d3.color(item.color);
-  const area = tileWidth * tileHeight;
   const dim = !tile.container && highlightedExtension &&
     item.extension !== highlightedExtension;
-  const bright = base.brighter(dim ? 0.15 : 1.25);
-  const dark = base.darker(dim ? 2.2 : 1.35);
+  const dark = base.darker(dim ? 2.1 : 1.15);
 
   if (tile.container) {
     context.fillStyle = dark.darker(1.4).formatRgb();
@@ -153,47 +151,44 @@ function drawTile(tile, item) {
     return;
   }
 
-  if (area < 220) {
-    context.fillStyle = dim ? dark.formatRgb() : base.formatRgb();
-  } else {
-    const linear = context.createLinearGradient(x0, y0, x0 + tileWidth, y0 + tileHeight);
-    linear.addColorStop(0, bright.formatRgb());
-    linear.addColorStop(0.52, base.formatRgb());
-    linear.addColorStop(1, dark.formatRgb());
-    context.fillStyle = linear;
-  }
+  context.fillStyle = dim ? dark.formatRgb() : base.darker(0.18).formatRgb();
   context.fillRect(x0, y0, tileWidth, tileHeight);
-
-  if (area >= 900) {
-    const glow = context.createRadialGradient(
-      x0 + tileWidth * 0.56,
-      y0 + tileHeight * 0.44,
-      0,
-      x0 + tileWidth * 0.56,
-      y0 + tileHeight * 0.44,
-      Math.max(tileWidth, tileHeight) * 0.58
-    );
-    glow.addColorStop(0, dim ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.58)');
-    glow.addColorStop(0.42, dim ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.13)');
-    glow.addColorStop(1, 'rgba(255,255,255,0)');
-    context.fillStyle = glow;
-    context.fillRect(x0, y0, tileWidth, tileHeight);
-  }
-
-  context.strokeStyle = dim ? 'rgba(0,0,0,0.42)' : 'rgba(255,255,255,0.23)';
+  context.fillStyle = dim ? 'rgba(255,255,255,0.025)' : 'rgba(255,255,255,0.1)';
+  context.fillRect(x0 + 1, y0 + 1, Math.max(0, tileWidth - 2), 1);
+  context.strokeStyle = dim ? 'rgba(0,0,0,0.5)' : 'rgba(8,12,15,0.62)';
   context.lineWidth = 1;
   context.strokeRect(x0 + 0.5, y0 + 0.5, Math.max(0, tileWidth - 1), Math.max(0, tileHeight - 1));
 
   if (tileWidth > 78 && tileHeight > 30) {
+    const showSize = tileWidth > 96 && tileHeight > 48;
+    const labelHeight = showSize ? 34 : 21;
     context.save();
     context.beginPath();
     context.rect(x0, y0, tileWidth, tileHeight);
     context.clip();
-    context.fillStyle = dim ? 'rgba(255,255,255,0.48)' : 'rgba(255,255,255,0.9)';
-    context.shadowColor = 'rgba(0,0,0,0.7)';
-    context.shadowBlur = 2;
+    context.fillStyle = dim ? 'rgba(8,12,15,0.62)' : 'rgba(8,12,15,0.78)';
+    context.fillRect(x0 + 1, y0 + 1, tileWidth - 2, labelHeight);
+    context.fillStyle = dim ? 'rgba(248,251,253,0.58)' : 'rgba(248,251,253,0.96)';
     context.font = '600 10px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
     context.fillText(item.name, x0 + 5, y0 + 14, tileWidth - 10);
+    if (showSize) {
+      context.fillStyle = dim ? 'rgba(220,228,234,0.42)' : 'rgba(220,228,234,0.78)';
+      context.font = '500 9px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
+      context.fillText(formatSize(item.size), x0 + 5, y0 + 27, tileWidth - 10);
+    }
     context.restore();
   }
+}
+
+function formatSize(bytes) {
+  const value = Number(bytes || 0);
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let unit = 0;
+  let scaled = value;
+  while (scaled >= 1024 && unit < units.length - 1) {
+    scaled /= 1024;
+    unit++;
+  }
+  const precision = scaled >= 100 || unit === 0 ? 0 : scaled >= 10 ? 1 : 2;
+  return `${scaled.toFixed(precision)} ${units[unit]}`;
 }

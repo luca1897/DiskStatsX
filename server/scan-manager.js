@@ -11,6 +11,7 @@ const MAX_SEARCH_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 const INITIAL_STATUS = {
   state: 'idle',
+  phase: 'idle',
   currentPath: '',
   filesScanned: 0,
   directoriesScanned: 0,
@@ -39,6 +40,7 @@ class ScanManager extends EventEmitter {
       { limit: historyLimit }
     );
     this.process = null;
+    this.queryProcesses = new Set();
     this.startedAt = null;
     this.finishedAt = null;
     this.stderrBuffer = '';
@@ -87,6 +89,7 @@ class ScanManager extends EventEmitter {
       throw createHttpError(500, 'scanner executable is missing; run make first');
     }
 
+    this.cancelQueries();
     this.reset(rootPath, filters);
     this.process = spawn(this.scannerPath, this.scannerArguments(rootPath, filters), {
       cwd: path.dirname(this.scannerPath),
@@ -103,7 +106,7 @@ class ScanManager extends EventEmitter {
       this.resultReady = false;
       this.resultBytes = 0;
       removeDatabase(this.workingPath);
-      this.publish('scan-error', { state: 'error', error: error.message });
+      this.publish('scan-error', { state: 'error', phase: 'error', error: error.message });
     });
     child.on('close', (code, signal) => this.handleClose({ child, code, signal }));
 
@@ -116,7 +119,7 @@ class ScanManager extends EventEmitter {
       throw createHttpError(409, 'no scan is running');
     }
     this.cancelRequested = true;
-    this.publish('canceling', { state: 'canceling', error: null });
+    this.publish('canceling', { state: 'canceling', phase: 'canceling', error: null });
     this.process.kill('SIGTERM');
   }
 
@@ -125,6 +128,7 @@ class ScanManager extends EventEmitter {
       this.cancelRequested = true;
       this.process.kill('SIGTERM');
     }
+    this.cancelQueries();
   }
 
   dispose() {
@@ -148,21 +152,23 @@ class ScanManager extends EventEmitter {
     if (!record || !databasePath) {
       throw createHttpError(404, 'scan snapshot is not available');
     }
+    this.cancelQueries();
     this.activateRecord(record, databasePath);
     this.publish('history-activated', { state: 'done', error: null });
     return this.snapshot;
   }
 
-  readDirectory(requestedPath) {
+  readDirectory(requestedPath, { signal } = {}) {
     this.requireResult();
     const targetPath = requestedPath || this.status.rootPath;
     return this.runScannerJson(
       ['--query', this.activeResultPath, targetPath],
-      MAX_QUERY_OUTPUT_BYTES
+      MAX_QUERY_OUTPUT_BYTES,
+      { signal }
     );
   }
 
-  search(options = {}) {
+  search(options = {}, { signal } = {}) {
     this.requireResult();
     const args = ['--search', this.activeResultPath, String(options.term || '')];
     appendSearchOption(args, '--extension', options.extension);
@@ -177,18 +183,18 @@ class ScanManager extends EventEmitter {
       args.push('--shared-blocks');
     }
     appendSearchOption(args, '--limit', Math.min(500, Math.max(1, Number(options.limit) || 200)));
-    return this.runScannerJson(args, MAX_SEARCH_OUTPUT_BYTES);
+    return this.runScannerJson(args, MAX_SEARCH_OUTPUT_BYTES, { signal });
   }
 
-  cleanup(options = {}) {
+  cleanup(options = {}, { signal } = {}) {
     this.requireResult();
     const args = ['--cleanup', this.activeResultPath];
     appendSearchOption(args, '--older-than-days', Math.max(0, Number(options.olderThanDays) || 30));
     appendSearchOption(args, '--limit', Math.min(300, Math.max(1, Number(options.limit) || 150)));
-    return this.runScannerJson(args, MAX_SEARCH_OUTPUT_BYTES);
+    return this.runScannerJson(args, MAX_SEARCH_OUTPUT_BYTES, { signal });
   }
 
-  compare(beforeId, afterId) {
+  compare(beforeId, afterId, { signal } = {}) {
     const before = this.history.find(beforeId);
     const after = this.history.find(afterId);
     const beforePath = this.history.databasePath(before);
@@ -199,7 +205,11 @@ class ScanManager extends EventEmitter {
     if (before.rootPath !== after.rootPath) {
       throw createHttpError(400, 'choose snapshots of the same root folder');
     }
-    return this.runScannerJson(['--compare', beforePath, afterPath], MAX_SEARCH_OUTPUT_BYTES);
+    return this.runScannerJson(
+      ['--compare', beforePath, afterPath],
+      MAX_SEARCH_OUTPUT_BYTES,
+      { signal }
+    );
   }
 
   scannerExists() {
@@ -239,6 +249,7 @@ class ScanManager extends EventEmitter {
     this.status = {
       ...INITIAL_STATUS,
       state: 'running',
+      phase: 'scanning',
       rootPath,
       filters,
       currentPath: rootPath
@@ -282,10 +293,11 @@ class ScanManager extends EventEmitter {
       return;
     }
     if (payload.error) {
-      this.publish('scan-error', { state: 'error', error: payload.error });
+      this.publish('scan-error', { state: 'error', phase: 'error', error: payload.error });
       return;
     }
     this.publish('progress', {
+      phase: payload.phase || this.status.phase,
       currentPath: payload.currentPath || this.status.currentPath,
       filesScanned: Number(payload.filesScanned || 0),
       directoriesScanned: Number(payload.directoriesScanned || 0),
@@ -323,7 +335,7 @@ class ScanManager extends EventEmitter {
       this.resultReady = false;
       this.resultBytes = 0;
       removeDatabase(this.workingPath);
-      this.publish('canceled', { state: 'canceled', error: null });
+      this.publish('canceled', { state: 'canceled', phase: 'canceled', error: null });
       return;
     }
     if (code !== 0) {
@@ -333,7 +345,7 @@ class ScanManager extends EventEmitter {
       const error = signal
         ? `scanner terminated by ${signal}`
         : `scanner exited with code ${code}`;
-      this.publish('scan-error', { state: 'error', error });
+      this.publish('scan-error', { state: 'error', phase: 'error', error });
       return;
     }
 
@@ -341,13 +353,14 @@ class ScanManager extends EventEmitter {
       const resultBytes = fs.statSync(this.workingPath).size;
       const record = this.history.add(this.workingPath, this.snapshot, resultBytes);
       this.activateRecord(record, record.databasePath);
-      this.publish('done', { state: 'done', error: null });
+      this.publish('done', { state: 'done', phase: 'done', error: null });
     } catch (error) {
       this.resultReady = false;
       this.resultBytes = 0;
       removeDatabase(this.workingPath);
       this.publish('scan-error', {
         state: 'error',
+        phase: 'error',
         error: `could not persist scan snapshot: ${error.message}`
       });
     }
@@ -372,6 +385,7 @@ class ScanManager extends EventEmitter {
     this.status = {
       ...INITIAL_STATUS,
       state: 'done',
+      phase: 'done',
       rootPath: record.rootPath,
       currentPath: record.rootPath,
       filters: record.filters || {},
@@ -391,45 +405,77 @@ class ScanManager extends EventEmitter {
     }
   }
 
-  runScannerJson(args, maxBytes) {
+  cancelQueries() {
+    for (const query of this.queryProcesses) {
+      query.kill('SIGTERM');
+    }
+  }
+
+  runScannerJson(args, maxBytes, { signal } = {}) {
+    if (signal?.aborted) {
+      return Promise.reject(createHttpError(499, 'native query canceled'));
+    }
     return new Promise((resolve, reject) => {
       const query = spawn(this.scannerPath, args, {
         cwd: path.dirname(this.scannerPath),
         stdio: ['ignore', 'pipe', 'pipe']
       });
+      this.queryProcesses.add(query);
       const output = [];
       const errors = [];
       let outputBytes = 0;
-      let rejected = false;
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        signal?.removeEventListener('abort', abortQuery);
+        this.queryProcesses.delete(query);
+        callback(value);
+      };
+      const abortQuery = () => {
+        query.kill('SIGTERM');
+        finish(reject, createHttpError(499, 'native query canceled'));
+      };
+      signal?.addEventListener('abort', abortQuery, { once: true });
+      if (signal?.aborted) {
+        abortQuery();
+        return;
+      }
       query.stdout.on('data', (chunk) => {
+        if (settled) {
+          return;
+        }
         outputBytes += chunk.length;
         if (outputBytes > maxBytes) {
-          rejected = true;
           query.kill('SIGTERM');
-          reject(createHttpError(413, 'native query output is too large'));
+          finish(reject, createHttpError(413, 'native query output is too large'));
           return;
         }
         output.push(chunk);
       });
-      query.stderr.on('data', (chunk) => errors.push(chunk));
-      query.on('error', (error) => {
-        if (!rejected) {
-          reject(error);
+      query.stderr.on('data', (chunk) => {
+        if (!settled) {
+          errors.push(chunk);
         }
       });
+      query.on('error', (error) => {
+        finish(reject, error);
+      });
       query.on('close', (code) => {
-        if (rejected) {
+        if (settled) {
           return;
         }
         if (code !== 0) {
           const message = Buffer.concat(errors).toString('utf8').trim();
-          reject(createHttpError(404, message || 'native query failed'));
+          finish(reject, createHttpError(404, message || 'native query failed'));
           return;
         }
         try {
-          resolve(JSON.parse(Buffer.concat(output).toString('utf8')));
+          finish(resolve, JSON.parse(Buffer.concat(output).toString('utf8')));
         } catch {
-          reject(createHttpError(500, 'scanner returned invalid JSON'));
+          finish(reject, createHttpError(500, 'scanner returned invalid JSON'));
         }
       });
     });

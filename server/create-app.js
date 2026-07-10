@@ -104,14 +104,12 @@ function createApp({ scanManager, defaultScanPath = '/', publicPath, vendorPath 
       });
       return;
     }
-    try {
-      const requestedPath = typeof request.query.path === 'string'
-        ? request.query.path
-        : scanManager.snapshot.rootPath;
-      response.json(await scanManager.readDirectory(requestedPath));
-    } catch (error) {
-      next(error);
-    }
+    const requestedPath = typeof request.query.path === 'string'
+      ? request.query.path
+      : scanManager.snapshot.rootPath;
+    await sendCancelableJson(request, response, next, (signal) => (
+      scanManager.readDirectory(requestedPath, { signal })
+    ));
   });
 
   app.get('/history', requireSession(sessionToken), (_request, response) => {
@@ -128,31 +126,25 @@ function createApp({ scanManager, defaultScanPath = '/', publicPath, vendorPath 
   });
 
   app.get('/compare', requireSession(sessionToken), async (request, response, next) => {
-    try {
-      const beforeId = typeof request.query.beforeId === 'string' ? request.query.beforeId : '';
-      const afterId = typeof request.query.afterId === 'string' ? request.query.afterId : '';
-      response.json(await scanManager.compare(beforeId, afterId));
-    } catch (error) {
-      next(error);
-    }
+    const beforeId = typeof request.query.beforeId === 'string' ? request.query.beforeId : '';
+    const afterId = typeof request.query.afterId === 'string' ? request.query.afterId : '';
+    await sendCancelableJson(request, response, next, (signal) => (
+      scanManager.compare(beforeId, afterId, { signal })
+    ));
   });
 
   app.get('/search', requireSession(sessionToken), async (request, response, next) => {
-    try {
-      response.json(await scanManager.search(normalizeSearch(request.query)));
-    } catch (error) {
-      next(error);
-    }
+    await sendCancelableJson(request, response, next, (signal) => (
+      scanManager.search(normalizeSearch(request.query), { signal })
+    ));
   });
 
   app.get('/cleanup', requireSession(sessionToken), async (request, response, next) => {
-    try {
-      const olderThanDays = Math.min(36500, Math.max(0, Number(request.query.olderThanDays) || 30));
-      const limit = Math.min(300, Math.max(1, Number(request.query.limit) || 150));
-      response.json(await scanManager.cleanup({ olderThanDays, limit }));
-    } catch (error) {
-      next(error);
-    }
+    const olderThanDays = Math.min(36500, Math.max(0, Number(request.query.olderThanDays) || 30));
+    const limit = Math.min(300, Math.max(1, Number(request.query.limit) || 150));
+    await sendCancelableJson(request, response, next, (signal) => (
+      scanManager.cleanup({ olderThanDays, limit }, { signal })
+    ));
   });
 
   app.post('/system-action', requireSession(sessionToken), (request, response) => {
@@ -166,11 +158,40 @@ function createApp({ scanManager, defaultScanPath = '/', publicPath, vendorPath 
     }
   });
 
-  app.use((error, _request, response, _next) => {
+  app.use((error, _request, response, next) => {
+    if (response.headersSent || response.destroyed) {
+      next(error);
+      return;
+    }
     response.status(error.statusCode || 500).json({ error: error.message || 'internal server error' });
   });
 
   return app;
+}
+
+async function sendCancelableJson(request, response, next, operation) {
+  const controller = new globalThis.AbortController();
+  const abort = () => controller.abort();
+  const abortIfDisconnected = () => {
+    if (!response.writableEnded) {
+      abort();
+    }
+  };
+  request.once('aborted', abort);
+  response.once('close', abortIfDisconnected);
+  try {
+    const payload = await operation(controller.signal);
+    if (!controller.signal.aborted && !response.writableEnded) {
+      response.json(payload);
+    }
+  } catch (error) {
+    if (!controller.signal.aborted && !response.destroyed) {
+      next(error);
+    }
+  } finally {
+    request.off('aborted', abort);
+    response.off('close', abortIfDisconnected);
+  }
 }
 
 function validateLocalRequest(request, response, next) {

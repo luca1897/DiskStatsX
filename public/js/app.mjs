@@ -28,6 +28,7 @@ document.documentElement.classList.toggle(
 
 class DiskStatsApp {
   constructor() {
+    const urlParameters = new URLSearchParams(window.location.search);
     this.elements = createDomReferences();
     this.api = new ApiClient();
     this.store = new AppStore();
@@ -40,8 +41,10 @@ class DiskStatsApp {
     this.resultLoadPromise = null;
     this.resultLoadPath = null;
     this.resultRequestId = 0;
+    this.resultAbortController = null;
     this.largestFilesSummary = null;
-    this.demoMode = new URLSearchParams(window.location.search).has('demo');
+    this.demoMode = urlParameters.has('demo');
+    this.initialView = urlParameters.get('view') === 'sunburst' ? 'sunburst' : 'treemap';
     this.reviewController = new ReviewController({
       elements: this.elements,
       onMessage: (message) => this.setToolbarMessage(message)
@@ -99,6 +102,7 @@ class DiskStatsApp {
       onAnalyze: (node) => this.navigateToDirectory(node),
       onNavigatePath: (path) => this.fetchResult(path),
       onSelect: (path) => this.setSelectedPath(path),
+      onHover: (path) => this.setHoveredPath(path),
       onContextMenu: (event, target) => this.contextMenu.show(event, target)
     };
 
@@ -130,6 +134,9 @@ class DiskStatsApp {
     });
 
     this.bind();
+    if (this.initialView === 'sunburst') {
+      this.setView(this.initialView);
+    }
     this.renderStatus();
     if (this.demoMode) {
       this.loadDemo();
@@ -263,9 +270,8 @@ class DiskStatsApp {
       this.demoMode = false;
       await this.loadConfig();
     }
+    this.cancelResultLoad();
     this.resultRequestId++;
-    this.resultLoadPromise = null;
-    this.resultLoadPath = null;
     this.largestFilesSummary = null;
     this.reviewController.clear();
     this.searchController.invalidate();
@@ -298,14 +304,18 @@ class DiskStatsApp {
     if (this.resultLoadPromise && this.resultLoadPath === path) {
       return this.resultLoadPromise;
     }
+    this.resultAbortController?.abort();
+    const controller = new globalThis.AbortController();
+    this.resultAbortController = controller;
     const requestId = ++this.resultRequestId;
     this.resultLoadPath = path;
     this.setToolbarMessage(`Loading ${path}`);
-    this.resultLoadPromise = this.loadResult(path, requestId)
+    this.resultLoadPromise = this.loadResult(path, requestId, controller.signal)
       .finally(() => {
         if (requestId === this.resultRequestId) {
           this.resultLoadPromise = null;
           this.resultLoadPath = null;
+          this.resultAbortController = null;
         }
       });
     return this.resultLoadPromise;
@@ -315,9 +325,8 @@ class DiskStatsApp {
     if (!status?.rootPath) {
       return;
     }
+    this.cancelResultLoad();
     this.resultRequestId++;
-    this.resultLoadPromise = null;
-    this.resultLoadPath = null;
     this.largestFilesSummary = null;
     this.reviewController.clear();
     this.searchController.invalidate();
@@ -346,18 +355,28 @@ class DiskStatsApp {
     }
   }
 
-  async loadResult(path, requestId) {
+  async loadResult(path, requestId, signal) {
     try {
-      const data = await this.api.getResult(path);
+      const data = await this.api.getResult(path, { signal });
       if (data && requestId === this.resultRequestId) {
         this.loadTree(data);
       }
     } catch (error) {
+      if (error.name === 'AbortError') {
+        return;
+      }
       if (requestId !== this.resultRequestId) {
         return;
       }
       this.setToolbarMessage(error.message || 'Could not load the directory');
     }
+  }
+
+  cancelResultLoad() {
+    this.resultAbortController?.abort();
+    this.resultAbortController = null;
+    this.resultLoadPromise = null;
+    this.resultLoadPath = null;
   }
 
   loadTree(data) {
@@ -417,6 +436,12 @@ class DiskStatsApp {
     this.treemapView.setSelectedPath(path);
     this.sunburstView.setSelectedPath(path);
     this.panelsView.setSelectedPath(path);
+  }
+
+  setHoveredPath(path) {
+    this.treeView.setHoveredPath(path);
+    this.treemapView.setHoveredPath(path);
+    this.sunburstView.setHoveredPath(path);
   }
 
   setView(view) {

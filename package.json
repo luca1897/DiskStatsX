@@ -9,8 +9,9 @@
     "start": "node server.js",
     "desktop": "npm run build:scanner && electron .",
     "package:mac": "npm run build:scanner && electron-builder --mac dmg zip",
+    "screenshots": "electron scripts/capture-screenshots.js",
     "dist": "npm run package:mac",
-    "lint": "eslint electron-main.js preload.js server.js server public/js public/treemap-worker.js test",
+    "lint": "eslint electron-main.js preload.js server.js server scripts public/js public/treemap-worker.js test",
     "test": "npm run build:scanner && node --test",
     "check": "npm run lint && npm test",
     "clean": "make clean && rm -rf dist"

@@ -25,6 +25,7 @@ The scanner is written in C and enumerates directories with Apple's `getattrlist
 - Bounded two-level Treemap and Sunburst payloads regardless of total scan size
 - Largest-files summary with Top 10 overall and Top 3 plus `Other files` per first-level folder
 - Hierarchical OffscreenCanvas Treemap rendered in a Web Worker
+- Parent navigation and breadcrumbs directly above the Treemap
 - Budgeted D3 Sunburst with two-level lazy views, zoom, ring controls and file filtering
 - Finder integration and contextual file actions
 - Review list with CSV export and confirmed Move to Trash
@@ -37,6 +38,7 @@ The scanner is written in C and enumerates directories with Apple's `getattrlist
 ## Screenshots
 
 The screenshots use the built-in anonymized demo dataset and contain no local paths or scanned filesystem metadata.
+Regenerate both images with `npm run screenshots`.
 
 ### Treemap
 

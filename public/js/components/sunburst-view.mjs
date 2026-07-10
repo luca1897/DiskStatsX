@@ -11,6 +11,7 @@ export class SunburstView {
     onAnalyze,
     onNavigatePath,
     onSelect,
+    onHover,
     onContextMenu
   }) {
     this.elements = elements;
@@ -19,10 +20,12 @@ export class SunburstView {
     this.onAnalyze = onAnalyze;
     this.onNavigatePath = onNavigatePath;
     this.onSelect = onSelect;
+    this.onHover = onHover;
     this.onContextMenu = onContextMenu;
     this.root = null;
     this.focusNode = null;
     this.selectedPath = null;
+    this.hoveredPath = null;
     this.svg = null;
     this.arcLayer = null;
     this.labelLayer = null;
@@ -31,7 +34,8 @@ export class SunburstView {
     this.centerRadius = 0;
     this.rings = this.restoreRings();
     this.showFiles = true;
-    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeFrame = 0;
+    this.resizeObserver = new ResizeObserver(() => this.scheduleResize());
     this.elements.sunburstRings.value = String(this.rings);
     this.bindControls();
   }
@@ -43,7 +47,7 @@ export class SunburstView {
     this.elements.emptyState.classList.add('hidden');
     this.initializeSvg();
     this.resizeObserver.observe(this.elements.chart);
-    this.render({ animate: false });
+    this.resize();
   }
 
   setFocus(node, { animate = true } = {}) {
@@ -61,10 +65,22 @@ export class SunburstView {
       .classed('highlighted', (node) => node.data.path === path);
   }
 
+  setHoveredPath(path) {
+    this.hoveredPath = path;
+    this.arcLayer?.selectAll('.sunburst-arc')
+      .classed('hovered', (node) => node.data.path === path);
+  }
+
   clear() {
+    if (this.resizeFrame) {
+      window.cancelAnimationFrame(this.resizeFrame);
+      this.resizeFrame = 0;
+    }
+    this.resizeObserver.disconnect();
     this.root = null;
     this.focusNode = null;
     this.selectedPath = null;
+    this.hoveredPath = null;
     this.elements.chart.replaceChildren();
     this.elements.breadcrumb.replaceChildren();
     this.elements.sunburstSegmentCount.textContent = '0 segments';
@@ -98,7 +114,16 @@ export class SunburstView {
     this.centerLayer.append('text').attr('class', 'center-label');
     this.centerLayer.append('text').attr('class', 'center-size');
     this.centerLayer.append('text').attr('class', 'center-meta');
-    this.resize();
+  }
+
+  scheduleResize() {
+    if (this.resizeFrame) {
+      return;
+    }
+    this.resizeFrame = requestAnimationFrame(() => {
+      this.resizeFrame = 0;
+      this.resize();
+    });
   }
 
   resize() {
@@ -130,41 +155,97 @@ export class SunburstView {
   displayNodes() {
     const focus = this.focusNode;
     const focusSpan = Math.max(Number.EPSILON, focus.x1 - focus.x0);
-    const eligible = [];
-    let candidateCount = 0;
-
-    for (const node of focus.descendants()) {
-      if (node === focus) {
-        continue;
-      }
+    const candidateCount = focus.descendants().filter((node) => {
       const depth = node.depth - focus.depth;
-      if (depth > this.rings || (!this.showFiles && node.data.type === 'file')) {
-        continue;
-      }
-      candidateCount++;
-      const target = {
-        x0: Math.max(0, Math.min(1, (node.x0 - focus.x0) / focusSpan)) * Math.PI * 2,
-        x1: Math.max(0, Math.min(1, (node.x1 - focus.x0) / focusSpan)) * Math.PI * 2,
-        depth
-      };
-      const angle = target.x1 - target.x0;
-      if (depth === 1 || angle >= SUNBURST.minimumAngle) {
-        eligible.push({ node, target, angle });
-      }
-    }
+      return node !== focus && depth <= this.rings &&
+        (this.showFiles || node.data.type !== 'file');
+    }).length;
+    const nodes = [];
 
-    const selected = eligible
-      .sort((left, right) => right.angle - left.angle)
-      .slice(0, SUNBURST.maxSegments);
-    const nodes = selected
-      .sort((left, right) => left.target.x0 - right.target.x0 || left.target.depth - right.target.depth)
-      .map(({ node, target }) => {
-        node.sunburstTarget = target;
-        return node;
-      });
+    const visit = (parent, depth) => {
+      if (depth > this.rings) {
+        return;
+      }
+      const entries = (parent.children || [])
+        .filter((node) => this.showFiles || node.data.type !== 'file')
+        .map((node) => {
+          const target = this.relativeTarget(node, focus, focusSpan, depth);
+          return { node, target, angle: target.x1 - target.x0 };
+        });
+      if (!entries.length) {
+        return;
+      }
+
+      const minimumAngle = this.minimumDisplayAngle(depth);
+      const keepCount = Math.min(SUNBURST.minimumChildrenPerParent, entries.length);
+      const visible = entries.filter((entry, index) => (
+        index < keepCount || entry.angle >= minimumAngle
+      ));
+      const aggregated = entries.slice(visible.length);
+
+      for (const entry of visible) {
+        entry.node.sunburstTarget = entry.target;
+        nodes.push(entry.node);
+        if (entry.node.data.type === 'directory') {
+          visit(entry.node, depth + 1);
+        }
+      }
+      if (aggregated.length) {
+        nodes.push(this.createAggregateNode(parent, aggregated, depth));
+      }
+    };
+    visit(focus, 1);
+
+    const displayedNodes = nodes.slice(0, SUNBURST.maxSegments);
+    const representedCount = displayedNodes.filter(
+      (node) => !node.data.sunburstAggregate
+    ).length;
     return {
-      nodes,
-      omitted: Math.max(0, candidateCount - nodes.length)
+      nodes: displayedNodes,
+      omitted: Math.max(0, candidateCount - representedCount)
+    };
+  }
+
+  relativeTarget(node, focus, focusSpan, depth) {
+    return {
+      x0: Math.max(0, Math.min(1, (node.x0 - focus.x0) / focusSpan)) * Math.PI * 2,
+      x1: Math.max(0, Math.min(1, (node.x1 - focus.x0) / focusSpan)) * Math.PI * 2,
+      depth
+    };
+  }
+
+  minimumDisplayAngle(depth) {
+    const ringWidth = (this.radius - this.centerRadius) / this.visibleRingCount();
+    const middleRadius = this.centerRadius + (depth - 0.5) * ringWidth;
+    return Math.max(
+      SUNBURST.minimumAngle,
+      SUNBURST.minimumArcPixels / Math.max(1, middleRadius)
+    );
+  }
+
+  createAggregateNode(parent, entries, depth) {
+    const first = entries[0];
+    const last = entries[entries.length - 1];
+    const count = entries.length;
+    return {
+      data: {
+        name: `Other (${formatCount(count)})`,
+        path: `diskstatsx:sunburst:other:${parent.data.path}:${depth}`,
+        type: 'aggregate',
+        synthetic: true,
+        sunburstAggregate: true,
+        itemCount: count
+      },
+      parent,
+      depth: parent.depth + 1,
+      value: d3.sum(entries, (entry) => Number(entry.node.value || 0)),
+      fileCount: d3.sum(entries, (entry) => Number(entry.node.fileCount || 0)),
+      subdirCount: d3.sum(entries, (entry) => Number(entry.node.subdirCount || 0)),
+      sunburstTarget: {
+        x0: first.target.x0,
+        x1: last.target.x1,
+        depth
+      }
     };
   }
 
@@ -212,17 +293,22 @@ export class SunburstView {
         });
       })
       .on('mouseenter', (event, node) => {
-        this.onSelect(node.data.path);
+        this.onHover(node.data.synthetic ? null : node.data.path);
         this.tooltip.showNode(event, node, this.focusNode.value || 1);
       })
       .on('mousemove', (event, node) => {
         this.tooltip.showNode(event, node, this.focusNode.value || 1);
       })
-      .on('mouseleave', () => this.tooltip.hide());
+      .on('mouseleave', () => {
+        this.onHover(null);
+        this.tooltip.hide();
+      });
 
     const merged = enter.merge(selection)
       .attr('fill', (node) => this.colorForNode(node))
-      .classed('highlighted', (node) => node.data.path === this.selectedPath);
+      .classed('aggregated', (node) => Boolean(node.data.sunburstAggregate))
+      .classed('highlighted', (node) => node.data.path === this.selectedPath)
+      .classed('hovered', (node) => node.data.path === this.hoveredPath);
 
     const applyPosition = (targetSelection) => targetSelection.attrTween('d', (node) => {
       const start = node.sunburstCurrent || this.collapsedPosition(node.sunburstTarget);

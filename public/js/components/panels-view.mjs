@@ -219,6 +219,9 @@ export class PanelsView {
     this.elements.filesTab.classList.toggle('active', files);
     this.elements.foldersTab.classList.toggle('active', folders);
     this.elements.reviewTab.classList.toggle('active', review);
+    this.elements.filesTab.setAttribute('aria-selected', String(files));
+    this.elements.foldersTab.setAttribute('aria-selected', String(folders));
+    this.elements.reviewTab.setAttribute('aria-selected', String(review));
     this.elements.filesPanel.classList.toggle('active', files);
     this.elements.foldersPanel.classList.toggle('active', folders);
     this.elements.reviewPanel.classList.toggle('active', review);

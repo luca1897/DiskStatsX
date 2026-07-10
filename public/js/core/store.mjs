@@ -1,5 +1,6 @@
 const INITIAL_STATUS = {
   state: 'idle',
+  phase: 'idle',
   currentPath: '',
   filesScanned: 0,
   directoriesScanned: 0,
@@ -65,6 +66,7 @@ export class AppStore {
       status: {
         ...INITIAL_STATUS,
         state: 'running',
+        phase: 'scanning',
         currentPath: path
       }
     });

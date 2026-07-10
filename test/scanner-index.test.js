@@ -38,9 +38,17 @@ test('native index returns a bounded folder view with an Other files cluster', a
 
   context.after(() => fs.rm(temporaryDirectory, { recursive: true, force: true }));
 
-  await execFileAsync(scannerPath, [rootPath, '--database', databasePath], {
+  const scanResult = await execFileAsync(scannerPath, [rootPath, '--database', databasePath], {
     maxBuffer: 4 * 1024 * 1024
   });
+  const phases = scanResult.stderr
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line).phase);
+  assert.deepEqual(
+    [...new Set(phases)],
+    ['scanning', 'indexing', 'search-index', 'optimizing', 'ready']
+  );
   const { stdout } = await execFileAsync(
     scannerPath,
     ['--query', databasePath, rootPath],

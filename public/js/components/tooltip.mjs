@@ -13,6 +13,9 @@ export class Tooltip {
       ? '<div class="muted">iCloud placeholder · no local data allocated</div>'
       : '';
     const allocationNotes = this.#allocationNotes(node.data);
+    const pathNote = node.data.sunburstAggregate
+      ? 'Aggregated smaller items'
+      : node.data.path || '';
     this.#setContent(node.data.path, `
       <strong>${escapeHtml(node.data.name || node.data.path)}</strong>
       <div>${formatSize(value)} allocated · ${percent.toFixed(percent >= 1 ? 1 : 2)}%</div>
@@ -21,7 +24,7 @@ export class Tooltip {
         : ''}
       ${storageNote}
       ${allocationNotes}
-      <div class="muted">${escapeHtml(node.data.path || '')}</div>
+      <div class="muted">${escapeHtml(pathNote)}</div>
     `);
     this.#position(event);
   }

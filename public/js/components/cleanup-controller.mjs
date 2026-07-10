@@ -16,6 +16,7 @@ export class CleanupController {
     this.onMessage = onMessage;
     this.results = [];
     this.requestId = 0;
+    this.abortController = null;
     this.bind();
   }
 
@@ -37,6 +38,8 @@ export class CleanupController {
   }
 
   invalidate() {
+    this.abortController?.abort();
+    this.abortController = null;
     this.requestId++;
     this.setLoading(false);
     this.results = [];
@@ -45,13 +48,19 @@ export class CleanupController {
   }
 
   async refresh() {
+    this.abortController?.abort();
+    const controller = new globalThis.AbortController();
+    this.abortController = controller;
     const requestId = ++this.requestId;
     this.setLoading(true);
     try {
-      const payload = await this.api.getCleanup({
-        olderThanDays: Math.max(0, Math.floor(Number(this.elements.cleanupDays.value || 0))),
-        limit: 150
-      });
+      const payload = await this.api.getCleanup(
+        {
+          olderThanDays: Math.max(0, Math.floor(Number(this.elements.cleanupDays.value || 0))),
+          limit: 150
+        },
+        { signal: controller.signal }
+      );
       if (requestId !== this.requestId) {
         return;
       }
@@ -59,6 +68,9 @@ export class CleanupController {
       this.renderResults();
       this.onMessage(`${this.results.length} cleanup candidates ready`);
     } catch (error) {
+      if (error.name === 'AbortError') {
+        return;
+      }
       if (requestId !== this.requestId) {
         return;
       }
@@ -69,6 +81,7 @@ export class CleanupController {
     } finally {
       if (requestId === this.requestId) {
         this.setLoading(false);
+        this.abortController = null;
       }
     }
   }

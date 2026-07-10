@@ -47,6 +47,8 @@ export const SUNBURST = {
   maxSegments: 1800,
   maxLabels: 24,
   minimumAngle: 0.0018,
+  minimumArcPixels: 3.5,
+  minimumChildrenPerParent: 3,
   labelMinimumAngle: 0.075,
   transitionMs: 620
 };

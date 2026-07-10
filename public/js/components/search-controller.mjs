@@ -21,6 +21,7 @@ export class SearchController {
     this.results = [];
     this.sort = { key: 'size', direction: -1 };
     this.requestId = 0;
+    this.abortController = null;
     this.bind();
   }
 
@@ -43,6 +44,8 @@ export class SearchController {
   }
 
   reset() {
+    this.abortController?.abort();
+    this.abortController = null;
     this.requestId++;
     this.setLoading(false);
     this.elements.searchForm.reset();
@@ -56,6 +59,8 @@ export class SearchController {
   }
 
   invalidate() {
+    this.abortController?.abort();
+    this.abortController = null;
     this.requestId++;
     this.setLoading(false);
     this.results = [];
@@ -67,10 +72,15 @@ export class SearchController {
   }
 
   async search() {
+    this.abortController?.abort();
+    const controller = new globalThis.AbortController();
+    this.abortController = controller;
     const requestId = ++this.requestId;
     this.setLoading(true);
     try {
-      const payload = await this.api.searchFiles(this.searchOptions());
+      const payload = await this.api.searchFiles(this.searchOptions(), {
+        signal: controller.signal
+      });
       if (requestId !== this.requestId) {
         return;
       }
@@ -81,6 +91,9 @@ export class SearchController {
       this.elements.searchEmpty.textContent = 'No files match these filters.';
       this.onMessage(`Indexed search returned ${this.results.length} ${suffix}`);
     } catch (error) {
+      if (error.name === 'AbortError') {
+        return;
+      }
       if (requestId !== this.requestId) {
         return;
       }
@@ -94,6 +107,7 @@ export class SearchController {
     } finally {
       if (requestId === this.requestId) {
         this.setLoading(false);
+        this.abortController = null;
       }
     }
   }

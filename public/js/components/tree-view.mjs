@@ -7,15 +7,16 @@ import {
 } from '../core/format.mjs';
 
 export class TreeView {
-  constructor({ wrapper, body, onAnalyze, onSelect, onContextMenu }) {
+  constructor({ wrapper, body, onAnalyze, onHover, onContextMenu }) {
     this.wrapper = wrapper;
     this.body = body;
     this.onAnalyze = onAnalyze;
-    this.onSelect = onSelect;
+    this.onHover = onHover;
     this.onContextMenu = onContextMenu;
     this.root = null;
     this.analysisNode = null;
     this.selectedPath = null;
+    this.hoveredPath = null;
     this.expandedPaths = new Set();
     this.rows = [];
     this.frame = 0;
@@ -47,6 +48,13 @@ export class TreeView {
     this.selectedPath = path;
     for (const row of this.body.querySelectorAll('tr[data-path]')) {
       row.classList.toggle('selected', row.dataset.path === path);
+    }
+  }
+
+  setHoveredPath(path) {
+    this.hoveredPath = path;
+    for (const row of this.body.querySelectorAll('tr[data-path]')) {
+      row.classList.toggle('hovered', row.dataset.path === path);
     }
   }
 
@@ -160,6 +168,7 @@ export class TreeView {
     row.dataset.rowIndex = String(index);
     row.classList.toggle('active-scope', this.analysisNode?.data.path === node.data.path);
     row.classList.toggle('selected', this.selectedPath === node.data.path);
+    row.classList.toggle('hovered', this.hoveredPath === node.data.path);
     row.innerHTML = `
       <td>
         <span class="tree-name" style="padding-left:${Math.min(node.depth, 12) * 14}px">
@@ -264,10 +273,11 @@ export class TreeView {
 
     this.body.addEventListener('mouseover', (event) => {
       const node = this.nodeFromEvent(event);
-      if (node && node.data.path !== this.selectedPath) {
-        this.onSelect(node.data.path);
+      if (node && node.data.path !== this.hoveredPath) {
+        this.onHover(node.data.path);
       }
     });
+    this.wrapper.addEventListener('mouseleave', () => this.onHover(null));
 
     for (const header of document.querySelectorAll('.tree-table th[data-tree-sort]')) {
       header.addEventListener('click', () => {
