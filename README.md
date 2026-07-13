@@ -38,7 +38,6 @@ The scanner is written in C and enumerates directories with Apple's `getattrlist
 ## Screenshots
 
 The screenshots use the built-in anonymized demo dataset and contain no local paths or scanned filesystem metadata.
-Regenerate both images with `npm run screenshots`.
 
 ### Treemap
 
