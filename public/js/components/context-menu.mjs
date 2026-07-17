@@ -35,22 +35,27 @@ export class ContextMenu {
     this.element.replaceChildren();
 
     if (target.type === 'directory') {
-      this.element.appendChild(this.createItem('Analyze this folder', () => {
+      this.element.appendChild(this.createItem('Explore this folder', () => {
         const directory = node || findNodeByPath(this.getRoot(), target.path);
         if (directory) {
           this.onAnalyze(directory);
         } else {
           this.onAnalyzePath(target.path);
         }
-      }));
-      this.element.appendChild(this.createItem('Rescan this folder', () => this.onRescan(target.path)));
+      }, false, 'Open this folder from the active scan without reading the disk again.'));
+      this.element.appendChild(this.createItem(
+        'Scan this folder',
+        () => this.onRescan(target.path),
+        false,
+        'Start a new native scan with this folder as the root.'
+      ));
       this.element.appendChild(this.createItem(
         'Always exclude this folder',
         () => this.onExclude(target.path)
       ));
     } else {
       const parentNode = node?.parent || findNodeByPath(root, parentDirectoryPath(target.path));
-      this.element.appendChild(this.createItem('Analyze containing folder', () => {
+      this.element.appendChild(this.createItem('Explore containing folder', () => {
         if (parentNode) {
           this.onAnalyze(parentNode);
         } else {
@@ -87,18 +92,21 @@ export class ContextMenu {
     this.element.setAttribute('aria-hidden', 'true');
   }
 
-  createItem(label, action, disabled = false) {
+  createItem(label, action, disabled = false, title = '') {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'context-menu-item';
     button.textContent = label;
     button.disabled = disabled;
+    if (title) {
+      button.title = title;
+    }
     button.addEventListener('click', async () => {
       this.hide();
       try {
         await action();
       } catch (error) {
-        this.onMessage(error.message || 'Action failed');
+        this.onMessage(error.message || 'Action failed', { error: true });
       }
     });
     return button;

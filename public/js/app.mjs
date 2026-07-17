@@ -43,11 +43,12 @@ class DiskStatsApp {
     this.resultRequestId = 0;
     this.resultAbortController = null;
     this.largestFilesSummary = null;
+    this.messageTimer = null;
     this.demoMode = urlParameters.has('demo');
     this.initialView = urlParameters.get('view') === 'sunburst' ? 'sunburst' : 'treemap';
     this.reviewController = new ReviewController({
       elements: this.elements,
-      onMessage: (message) => this.setToolbarMessage(message)
+      onMessage: (message, options) => this.setToolbarMessage(message, options)
     });
 
     this.contextMenu = new ContextMenu({
@@ -66,7 +67,7 @@ class DiskStatsApp {
       },
       onToggleReview: (target) => this.reviewController.toggle(target),
       isReviewed: (path) => this.reviewController.has(path),
-      onMessage: (message) => this.setToolbarMessage(message)
+      onMessage: (message, options) => this.setToolbarMessage(message, options)
     });
 
     this.historyController = new HistoryController({
@@ -152,7 +153,6 @@ class DiskStatsApp {
 
   loadDemo() {
     const data = createDemoTree();
-    this.elements.pathInput.value = data.path;
     this.loadTree(data);
     const root = this.store.state.root;
     this.updateStatus({
@@ -169,7 +169,7 @@ class DiskStatsApp {
     try {
       const config = await this.api.getConfig();
       if (config.defaultScanPath && this.elements.pathInput.value === '/') {
-        this.elements.pathInput.value = config.defaultScanPath;
+        this.setCurrentPath(config.defaultScanPath);
       }
     } catch {
       // The root path remains a valid default if configuration is unavailable.
@@ -177,6 +177,10 @@ class DiskStatsApp {
   }
 
   bind() {
+    this.elements.appMessageClose.addEventListener('click', () => this.hideAppMessage());
+    this.elements.errorAlertClose.addEventListener('click', () => this.closeErrorAlert());
+    this.elements.errorAlertConfirm.addEventListener('click', () => this.closeErrorAlert());
+
     this.elements.form.addEventListener('submit', async (event) => {
       event.preventDefault();
       const path = this.elements.pathInput.value.trim();
@@ -206,12 +210,12 @@ class DiskStatsApp {
       try {
         const selectedPath = await window.diskStatsX.selectDirectory();
         if (selectedPath) {
-          this.elements.pathInput.value = selectedPath;
+          this.setCurrentPath(selectedPath);
           this.elements.pathInput.focus();
           this.setToolbarMessage('Folder selected');
         }
       } catch (error) {
-        this.setToolbarMessage(error.message || 'Could not open folder picker');
+        this.setToolbarMessage(error.message || 'Could not open folder picker', { error: true });
       }
     });
 
@@ -234,7 +238,7 @@ class DiskStatsApp {
       snapshot: (payload) => {
         this.updateStatus(payload);
         if (payload.resultReady) {
-          this.elements.pathInput.value = payload.rootPath;
+          this.setCurrentPath(payload.rootPath);
           this.fetchResult(payload.rootPath);
         }
       },
@@ -250,7 +254,7 @@ class DiskStatsApp {
       },
       done: (payload) => {
         this.updateStatus(payload);
-        this.elements.pathInput.value = payload.rootPath;
+        this.setCurrentPath(payload.rootPath);
         this.fetchResult(payload.rootPath);
         if (this.elements.historyDialog.open) {
           this.historyController.refresh();
@@ -276,6 +280,7 @@ class DiskStatsApp {
     this.reviewController.clear();
     this.searchController.invalidate();
     this.cleanupController.invalidate();
+    this.setCurrentPath(path);
     this.store.resetForScan(path);
     this.clearViews();
     this.showEmptyState(
@@ -309,7 +314,7 @@ class DiskStatsApp {
     this.resultAbortController = controller;
     const requestId = ++this.resultRequestId;
     this.resultLoadPath = path;
-    this.setToolbarMessage(`Loading ${path}`);
+    this.setToolbarMessage(`Loading ${path}`, { notify: false });
     this.resultLoadPromise = this.loadResult(path, requestId, controller.signal)
       .finally(() => {
         if (requestId === this.resultRequestId) {
@@ -332,7 +337,7 @@ class DiskStatsApp {
     this.searchController.invalidate();
     this.cleanupController.invalidate();
     this.updateStatus(status);
-    this.elements.pathInput.value = status.rootPath;
+    this.setCurrentPath(status.rootPath);
     this.clearViews();
     await this.fetchResult(status.rootPath);
   }
@@ -368,7 +373,7 @@ class DiskStatsApp {
       if (requestId !== this.resultRequestId) {
         return;
       }
-      this.setToolbarMessage(error.message || 'Could not load the directory');
+      this.setToolbarMessage(this.formatDirectoryError(error), { error: true });
     }
   }
 
@@ -403,7 +408,7 @@ class DiskStatsApp {
     this.panelsView.setLargestFiles(this.largestFilesSummary);
     this.applyAnalysisNode(root, { animateSunburst: false });
     this.setView(this.store.state.view);
-    this.setToolbarMessage(data.path);
+    this.setToolbarMessage(`Exploring ${data.path}`, { notify: false });
   }
 
   navigateToDirectory(node) {
@@ -423,6 +428,7 @@ class DiskStatsApp {
 
   applyAnalysisNode(node, { animateSunburst = true } = {}) {
     this.store.update({ analysisNode: node });
+    this.setCurrentPath(node.data.path);
     this.treeView.setAnalysisNode(node);
     this.treemapView.setScope(node);
     this.sunburstView.setFocus(node, { animate: animateSunburst });
@@ -489,14 +495,69 @@ class DiskStatsApp {
 
   handleScanError(payload) {
     this.updateStatus(payload);
+    this.setToolbarMessage(payload.error || 'The scanner reported an error.', { error: true });
     this.showEmptyState(
       'Scan failed',
       payload.error || 'The scanner reported an error.'
     );
   }
 
-  setToolbarMessage(message) {
-    this.elements.toolbarState.textContent = message;
+  setCurrentPath(path) {
+    if (!path) {
+      return;
+    }
+    this.elements.pathInput.value = path;
+    this.elements.pathInput.title = path;
+  }
+
+  setToolbarMessage(message, { error = false, notify = true } = {}) {
+    const text = String(message || '');
+    this.elements.toolbarState.textContent = text;
+    this.elements.toolbarState.title = text;
+    this.elements.toolbarState.classList.toggle('error', error);
+    if (error) {
+      this.showErrorAlert(text);
+    } else if (notify) {
+      this.showAppMessage(text);
+    } else {
+      this.hideAppMessage();
+    }
+  }
+
+  formatDirectoryError(error) {
+    const message = error?.message || 'Could not load the directory';
+    if (/directory is not present in the scan index/i.test(message)) {
+      return 'This folder is not available in the active scan. Use Scan this folder to create a new scan.';
+    }
+    return message;
+  }
+
+  showAppMessage(message) {
+    window.clearTimeout(this.messageTimer);
+    this.elements.appMessageText.textContent = message;
+    this.elements.appMessage.hidden = false;
+    this.messageTimer = window.setTimeout(() => this.hideAppMessage(), 2400);
+  }
+
+  hideAppMessage() {
+    window.clearTimeout(this.messageTimer);
+    this.messageTimer = null;
+    this.elements.appMessage.hidden = true;
+  }
+
+  showErrorAlert(message) {
+    this.hideAppMessage();
+    this.elements.errorAlertMessage.textContent = message;
+    if (!this.elements.errorAlert.open) {
+      this.elements.errorAlert.showModal();
+    }
+    this.elements.errorAlertConfirm.focus();
+  }
+
+  closeErrorAlert() {
+    if (this.elements.errorAlert.open) {
+      this.elements.errorAlert.close();
+    }
   }
 
   showEmptyState(title, description) {

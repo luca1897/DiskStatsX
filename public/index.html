@@ -55,8 +55,8 @@
           <button id="layout-vertical-button" class="view-button active" type="button">Stack</button>
           <button id="layout-horizontal-button" class="view-button" type="button">Side</button>
         </div>
-        <div id="toolbar-state" class="toolbar-state" role="status" aria-live="polite">Idle</div>
       </header>
+      <div id="toolbar-state" class="app-live-region" role="status" aria-live="polite">Idle</div>
 
       <main id="workspace" class="workspace layout-vertical">
         <section class="tree-panel">
@@ -212,6 +212,27 @@
 
     <div id="tooltip" class="tooltip" role="tooltip"></div>
     <div id="context-menu" class="context-menu" role="menu" aria-hidden="true"></div>
+    <div id="app-message" class="app-message" role="status" aria-live="polite" hidden>
+      <span id="app-message-text"></span>
+      <button id="app-message-close" type="button" aria-label="Dismiss message" title="Dismiss">&times;</button>
+    </div>
+
+    <dialog id="error-alert" class="error-alert" aria-labelledby="error-alert-title"
+      aria-describedby="error-alert-message">
+      <div class="error-alert-header">
+        <span class="error-alert-icon" aria-hidden="true">!</span>
+        <div>
+          <span class="dialog-kicker">DiskStatsX</span>
+          <h2 id="error-alert-title">Couldn’t complete the action</h2>
+        </div>
+        <button id="error-alert-close" class="dialog-close" type="button"
+          aria-label="Close error" title="Close">&times;</button>
+      </div>
+      <p id="error-alert-message" class="error-alert-message"></p>
+      <div class="error-alert-actions">
+        <button id="error-alert-confirm" class="dialog-primary" type="button">OK</button>
+      </div>
+    </dialog>
 
     <dialog id="history-dialog" class="app-dialog history-dialog" aria-labelledby="history-dialog-title">
       <div class="dialog-header">

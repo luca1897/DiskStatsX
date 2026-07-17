@@ -55,7 +55,7 @@ test('API scans a directory with native cache exclusions', async (context) => {
       Cookie: sessionCookie
     },
     body: JSON.stringify({
-      path: fixturePath,
+      path: `${fixturePath}${path.sep}`,
       filters: {
         caches: true,
         exclusions: [path.join(fixturePath, 'ignored')]
@@ -65,6 +65,7 @@ test('API scans a directory with native cache exclusions', async (context) => {
   assert.equal(startResponse.status, 202);
 
   await waitForStatus(manager, 'done');
+  assert.equal(manager.snapshot.rootPath, fixturePath);
   const resultResponse = await fetch(`${baseUrl}/result`, {
     headers: { Cookie: sessionCookie }
   });
@@ -93,6 +94,62 @@ test('API scans a directory with native cache exclusions', async (context) => {
     child.breadcrumbs.map((entry) => entry.name),
     ['fixture', 'keep']
   );
+});
+
+test('ScanManager normalizes a legacy snapshot root before restoring it', async (context) => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'diskstatsx-restore-'));
+  const historyPath = path.join(temporaryDirectory, 'history');
+  const databaseFile = 'legacy-snapshot.sqlite';
+  const fixturePath = path.join(temporaryDirectory, 'fixture');
+  await fs.mkdir(historyPath, { recursive: true });
+  await fs.mkdir(fixturePath, { recursive: true });
+  await fs.writeFile(path.join(historyPath, databaseFile), 'index');
+  await fs.writeFile(path.join(historyPath, 'history.json'), JSON.stringify([{
+    id: 'legacy-snapshot',
+    databaseFile,
+    createdAt: new Date().toISOString(),
+    rootPath: `${fixturePath}${path.sep}`,
+    resultBytes: 5
+  }]));
+
+  const manager = new ScanManager({
+    scannerPath: path.join(projectRoot, 'scanner'),
+    resultPath: path.join(temporaryDirectory, 'result.sqlite'),
+    historyPath
+  });
+  context.after(async () => {
+    manager.dispose();
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  assert.equal(manager.snapshot.rootPath, fixturePath);
+  assert.equal(manager.listHistory()[0].rootPath, fixturePath);
+});
+
+test('ScanManager preserves a detailed native scanner error', async (context) => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'diskstatsx-error-'));
+  const scannerPath = path.join(temporaryDirectory, 'failing-scanner');
+  await fs.writeFile(scannerPath, `#!/bin/sh
+printf '{"error":"cannot open directory: /missing"}\\n' >&2
+exit 1
+`);
+  await fs.chmod(scannerPath, 0o755);
+
+  const manager = new ScanManager({
+    scannerPath,
+    resultPath: path.join(temporaryDirectory, 'result.sqlite')
+  });
+  context.after(async () => {
+    manager.dispose();
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  manager.start('/missing', {});
+  const scanner = manager.process;
+  await once(scanner, 'close');
+
+  assert.equal(manager.snapshot.state, 'error');
+  assert.equal(manager.snapshot.error, 'cannot open directory: /missing');
 });
 
 test('local service rejects foreign hosts, origins and unauthenticated API requests', async (context) => {

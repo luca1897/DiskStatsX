@@ -89,9 +89,10 @@ class ScanManager extends EventEmitter {
       throw createHttpError(500, 'scanner executable is missing; run make first');
     }
 
+    const normalizedRootPath = normalizeRootPath(rootPath);
     this.cancelQueries();
-    this.reset(rootPath, filters);
-    this.process = spawn(this.scannerPath, this.scannerArguments(rootPath, filters), {
+    this.reset(normalizedRootPath, filters);
+    this.process = spawn(this.scannerPath, this.scannerArguments(normalizedRootPath, filters), {
       cwd: path.dirname(this.scannerPath),
       stdio: ['ignore', 'ignore', 'pipe']
     });
@@ -139,6 +140,7 @@ class ScanManager extends EventEmitter {
   listHistory() {
     return this.history.list().map((record) => ({
       ...record,
+      rootPath: normalizeRootPath(record.rootPath),
       active: record.id === this.activeSnapshot?.id
     }));
   }
@@ -202,7 +204,7 @@ class ScanManager extends EventEmitter {
     if (!before || !after || !beforePath || !afterPath) {
       throw createHttpError(404, 'one or both scan snapshots are not available');
     }
-    if (before.rootPath !== after.rootPath) {
+    if (normalizeRootPath(before.rootPath) !== normalizeRootPath(after.rootPath)) {
       throw createHttpError(400, 'choose snapshots of the same root folder');
     }
     return this.runScannerJson(
@@ -342,9 +344,9 @@ class ScanManager extends EventEmitter {
       this.resultReady = false;
       this.resultBytes = 0;
       removeDatabase(this.workingPath);
-      const error = signal
+      const error = this.status.error || (signal
         ? `scanner terminated by ${signal}`
-        : `scanner exited with code ${code}`;
+        : `scanner exited with code ${code}`);
       this.publish('scan-error', { state: 'error', phase: 'error', error });
       return;
     }
@@ -375,7 +377,8 @@ class ScanManager extends EventEmitter {
   }
 
   activateRecord(record, databasePath) {
-    this.activeSnapshot = record;
+    const rootPath = normalizeRootPath(record.rootPath);
+    this.activeSnapshot = { ...record, rootPath };
     this.activeResultPath = databasePath;
     this.resultReady = true;
     this.resultBytes = Number(record.resultBytes || fs.statSync(databasePath).size || 0);
@@ -386,8 +389,8 @@ class ScanManager extends EventEmitter {
       ...INITIAL_STATUS,
       state: 'done',
       phase: 'done',
-      rootPath: record.rootPath,
-      currentPath: record.rootPath,
+      rootPath,
+      currentPath: rootPath,
       filters: record.filters || {},
       filesScanned: Number(record.filesScanned || 0),
       directoriesScanned: Number(record.directoriesScanned || 0),
@@ -487,6 +490,10 @@ function appendSearchOption(args, flag, value) {
     return;
   }
   args.push(flag, String(value));
+}
+
+function normalizeRootPath(rootPath) {
+  return path.resolve(String(rootPath));
 }
 
 function removeDatabase(databasePath) {
