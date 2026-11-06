@@ -41,6 +41,18 @@ test('native index returns a bounded folder view with an Other files cluster', a
   const scanResult = await execFileAsync(scannerPath, [rootPath, '--database', databasePath], {
     maxBuffer: 4 * 1024 * 1024
   });
+  const { stdout: fileColumns } = await execFileAsync('sqlite3', [
+    databasePath,
+    'SELECT name FROM pragma_table_info(\'files\') ORDER BY cid'
+  ]);
+  const { stdout: directoryColumns } = await execFileAsync('sqlite3', [
+    databasePath,
+    'SELECT name FROM pragma_table_info(\'directories\') ORDER BY cid'
+  ]);
+  assert.equal(fileColumns.split('\n').includes('path'), false);
+  assert.equal(fileColumns.split('\n').includes('root_branch_id'), false);
+  assert.equal(directoryColumns.split('\n').includes('path'), false);
+  assert.equal(directoryColumns.split('\n').includes('path_hash'), true);
   const phases = scanResult.stderr
     .trim()
     .split(/\r?\n/)
@@ -175,6 +187,14 @@ test('native index searches files, suggests cleanup candidates and compares snap
   assert.equal(searchResult.results[0].path, reportPath);
   assert.ok(searchResult.results[0].modifiedAt > 0);
 
+  const pathSearch = await execFileAsync(scannerPath, [
+    '--search', beforeDatabase, 'Downloads old-installer'
+  ]);
+  assert.deepEqual(
+    JSON.parse(pathSearch.stdout).results.map((entry) => entry.path),
+    [imagePath]
+  );
+
   const tokenizedTerm = Array.from({ length: 120 }, () => 'a').join(' ');
   const tokenizedSearch = await execFileAsync(scannerPath, [
     '--search',
@@ -209,3 +229,69 @@ test('native index searches files, suggests cleanup candidates and compares snap
     entry.path === downloadsPath && entry.kind === 'grown' && entry.delta > 0
   )));
 });
+
+test('compact snapshots can search and compare with an existing path-based snapshot', async (context) => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'diskstatsx-legacy-'));
+  const rootPath = path.join(temporaryDirectory, 'root');
+  const compactDatabase = path.join(temporaryDirectory, 'compact.sqlite');
+  const legacyDatabase = path.join(temporaryDirectory, 'legacy.sqlite');
+  const existingFile = path.join(rootPath, 'existing.bin');
+  await fs.mkdir(rootPath);
+  await fs.writeFile(existingFile, 'old');
+  await fs.writeFile(path.join(rootPath, 'added.bin'), 'new');
+  context.after(() => fs.rm(temporaryDirectory, { recursive: true, force: true }));
+
+  await execFileAsync(scannerPath, [rootPath, '--database', compactDatabase]);
+  const legacySql = [
+    'CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT)',
+    'INSERT INTO metadata VALUES(\'root_path\', ' + sqlQuote(rootPath) + ')',
+    'CREATE TABLE scan_summary(allocated_bytes INTEGER,logical_bytes INTEGER,' +
+      'cloud_only_files INTEGER,symlinks_skipped INTEGER,unreadable_directories INTEGER,' +
+      'excluded_directories INTEGER,hardlink_duplicates INTEGER,hardlink_bytes_saved INTEGER,' +
+      'clone_duplicates INTEGER,clone_bytes_saved INTEGER,shared_block_files INTEGER)',
+    'INSERT INTO scan_summary VALUES(4096,3,0,0,0,0,0,0,0,0,0)',
+    'CREATE TABLE directories(id INTEGER PRIMARY KEY,parent_id INTEGER,name TEXT,path TEXT,' +
+      'size INTEGER,logical_size INTEGER,direct_file_size INTEGER,file_count INTEGER,' +
+      'directory_count INTEGER,direct_file_count INTEGER,direct_directory_count INTEGER)',
+    'INSERT INTO directories VALUES(1,NULL,\'root\',' + sqlQuote(rootPath) +
+      ',4096,3,4096,1,0,1,0)',
+    'CREATE UNIQUE INDEX directories_path ON directories(path)',
+    'CREATE TABLE files(id INTEGER PRIMARY KEY,parent_id INTEGER,name TEXT,path TEXT,' +
+      'modified_at INTEGER,size INTEGER,logical_size INTEGER,allocated_size INTEGER,' +
+      'cloud_only INTEGER,hardlink_duplicate INTEGER,clone_duplicate INTEGER,' +
+      'shared_blocks INTEGER,clone_refcount INTEGER,root_branch_id INTEGER)',
+    'INSERT INTO files VALUES(1,1,\'existing.bin\',' + sqlQuote(existingFile) +
+      ',0,4096,3,4096,0,0,0,0,0,NULL)',
+    'CREATE TABLE largest_files(scope TEXT,root_branch_id INTEGER,rank INTEGER,' +
+      'name TEXT,path TEXT,size INTEGER,logical_size INTEGER,allocated_size INTEGER,' +
+      'cloud_only INTEGER)',
+    'CREATE TABLE branch_file_summary(root_branch_id INTEGER,file_count INTEGER,file_size INTEGER)'
+  ].join(';') + ';';
+  await execFileAsync('sqlite3', [legacyDatabase, legacySql]);
+
+  const legacySearch = await execFileAsync(scannerPath, [
+    '--search', legacyDatabase, 'existing'
+  ]);
+  assert.deepEqual(
+    JSON.parse(legacySearch.stdout).results.map((entry) => entry.path),
+    [existingFile]
+  );
+  const legacyView = await execFileAsync(scannerPath, [
+    '--query', legacyDatabase, rootPath
+  ]);
+  assert.equal(JSON.parse(legacyView.stdout).children[0].path, existingFile);
+
+  for (const [before, after] of [
+    [legacyDatabase, compactDatabase],
+    [compactDatabase, legacyDatabase]
+  ]) {
+    const comparison = await execFileAsync(scannerPath, ['--compare', before, after]);
+    const result = JSON.parse(comparison.stdout);
+    assert.equal(Math.abs(result.delta.fileCount), 1);
+    assert.equal(result.changes[0].path, rootPath);
+  }
+});
+
+function sqlQuote(value) {
+  return `'${value.replaceAll("'", "''")}'`;
+}

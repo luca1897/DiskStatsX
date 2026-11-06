@@ -46,6 +46,27 @@ export class ApiClient {
     return parseResponse(response);
   }
 
+  async updateHistoryPolicy(policy) {
+    const response = await fetch('/history/policy', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(policy)
+    });
+    return parseResponse(response);
+  }
+
+  async deleteHistory(id) {
+    const response = await fetch(`/history/${encodeURIComponent(id)}`, {
+      method: 'DELETE'
+    });
+    return parseResponse(response);
+  }
+
+  async clearHistory() {
+    const response = await fetch('/history', { method: 'DELETE' });
+    return parseResponse(response);
+  }
+
   async compareHistory(beforeId, afterId, { signal } = {}) {
     const query = new URLSearchParams({ beforeId, afterId });
     const response = await fetch(`/compare?${query}`, { signal });

@@ -8,6 +8,8 @@ The scanner writes each directory placeholder and file row into SQLite as `getat
 
 The scanner exposes read-only query modes used by the Node.js service: a bounded directory window, indexed file search, cleanup-candidate classification and snapshot comparison. A directory query returns direct children, one level of contents for the largest child directories, breadcrumbs, and optional `Other folders` / `Other files` clusters. The renderer never receives the complete filesystem hierarchy.
 
+Schema version 8 stores each file's name and parent directory ID without repeating its full path. Directories store a 128-bit SHA-256 path key instead of path text; the scanner reconstructs a requested path from parent IDs and names. File names and directory paths have separate, contentless FTS5 indexes with `detail=none` and `columnsize=0`. APFS flags share one integer field, and a file's allocated size is stored only when it differs from its attributed size. The root path remains in metadata. Query modes also read older path-based snapshots, including comparisons across schema versions.
+
 Key guarantees:
 
 - no fallback traversal implementation;
@@ -81,7 +83,7 @@ The full filesystem hierarchy remains available in the native index, while each 
 - the Sunburst uses the same two-level window, filters sub-pixel arcs and caps SVG segment count;
 - expensive child sorting and leaf collection are cached.
 
-Completed indexes build a SQLite FTS5 name/path index, then are atomically renamed into a retained snapshot archive. Search, cleanup and comparisons execute native read-only SQLite queries against the selected snapshot, so those workflows do not require rebuilding or shipping the full hierarchy to the renderer.
+Completed indexes build separate SQLite FTS5 name and directory-path indexes, then are atomically renamed into a retained snapshot archive. Search, cleanup and comparisons execute native read-only SQLite queries against the selected snapshot, so those workflows do not require rebuilding or shipping the full hierarchy to the renderer. Existing snapshots remain readable; the compact schema applies to new scans.
 
 ## Trust Boundaries
 

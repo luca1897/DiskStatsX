@@ -234,6 +234,21 @@
       </div>
     </dialog>
 
+    <dialog id="confirmation-alert" class="confirmation-alert"
+      aria-labelledby="confirmation-alert-title" aria-describedby="confirmation-alert-message">
+      <div class="confirmation-alert-header">
+        <span class="confirmation-alert-icon" aria-hidden="true">!</span>
+        <h2 id="confirmation-alert-title">Confirm action</h2>
+        <button id="confirmation-alert-close" class="dialog-close" type="button"
+          aria-label="Close confirmation" title="Cancel">&times;</button>
+      </div>
+      <p id="confirmation-alert-message" class="confirmation-alert-message"></p>
+      <div class="confirmation-alert-actions">
+        <button id="confirmation-alert-cancel" class="dialog-secondary" type="button">Cancel</button>
+        <button id="confirmation-alert-confirm" class="dialog-primary" type="button">Confirm</button>
+      </div>
+    </dialog>
+
     <dialog id="history-dialog" class="app-dialog history-dialog" aria-labelledby="history-dialog-title">
       <div class="dialog-header">
         <div>
@@ -242,7 +257,41 @@
         </div>
         <button id="history-close" class="dialog-close" type="button" aria-label="Close" title="Close">&times;</button>
       </div>
-      <div class="dialog-body">
+      <div class="dialog-body history-dialog-body">
+        <section class="history-storage" aria-label="History storage">
+          <div class="history-storage-summary">
+            <div class="history-storage-heading">
+              <strong id="history-storage-used">0 B</strong>
+              <span>of <span id="history-storage-limit">2 GB</span></span>
+            </div>
+            <div id="history-storage-meter" class="history-storage-meter" role="progressbar"
+              aria-label="History storage used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <span id="history-storage-meter-fill"></span>
+            </div>
+            <div class="history-storage-stats">
+              <span><strong id="history-storage-count">0</strong> snapshots</span>
+              <span><strong id="history-storage-protected">0</strong> protected</span>
+              <span><strong id="history-storage-reclaimable">0 B</strong> clearable</span>
+            </div>
+          </div>
+          <form id="history-policy-form" class="history-policy-form">
+            <label class="dialog-field history-limit-field">
+              <span>Max snapshots</span>
+              <input id="history-max-snapshots" type="number" min="1" max="100" step="1" value="12">
+            </label>
+            <label class="dialog-field history-limit-field">
+              <span>Storage limit (GB)</span>
+              <input id="history-max-gb" type="number" min="0.25" max="1024" step="0.25" value="2">
+            </label>
+            <label class="dialog-toggle history-preserve-toggle">
+              <input id="history-preserve-roots" type="checkbox" checked>
+              <span>Keep latest per path</span>
+            </label>
+            <button id="history-policy-save" class="dialog-primary" type="submit">Save limits</button>
+            <button id="history-clear" class="dialog-danger" type="button">Clear history</button>
+          </form>
+          <div id="history-policy-status" class="history-policy-status" role="status"></div>
+        </section>
         <div class="dialog-controls history-controls">
           <label class="dialog-field">
             <span>Baseline</span>
@@ -262,7 +311,8 @@
               <tr>
                 <th>Captured</th>
                 <th>Path</th>
-                <th>Allocated</th>
+                <th>Scanned</th>
+                <th>Index size</th>
                 <th>Files</th>
                 <th></th>
               </tr>

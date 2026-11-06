@@ -29,7 +29,7 @@ The scanner is written in C and enumerates directories with Apple's `getattrlist
 - Budgeted D3 Sunburst with two-level lazy views, zoom, ring controls and file filtering
 - Finder integration and contextual file actions
 - Review list with CSV export and confirmed Move to Trash
-- Persistent scan history with snapshot restore and folder-level comparisons
+- Persistent scan history with snapshot restore, folder-level comparisons and storage retention controls
 - FTS-indexed file search by name, path, extension, size, modification date, iCloud and shared-block state
 - Guided cleanup candidates for large installers, archives, disk images, caches and old downloads
 - Allocated/logical size breakdown with scan-quality diagnostics
@@ -123,6 +123,20 @@ Native renderer crash reports are stored by macOS in:
 ```
 
 The application records scan lifecycle events, renderer failures and JavaScript errors. Logs can include the selected scan root, so review them before sharing publicly.
+
+## Scan History Storage
+
+Each completed scan is stored as a SQLite snapshot in:
+
+```text
+~/Library/Application Support/diskstatsx/scans/
+```
+
+History shows the real index size for every snapshot and the total space used. By default DiskStatsX keeps up to 12 snapshots within a 2 GB storage budget. The newest snapshot is always protected; the newest snapshot for each scanned path is also protected unless that option is disabled. Protected snapshots may exceed the configured budget.
+
+The History dialog can delete individual inactive snapshots, clear all inactive history, and change both retention limits. Saving tighter limits immediately removes the oldest unprotected snapshots until the limits are satisfied. The currently loaded snapshot cannot be deleted.
+
+New scans use a compact SQLite schema that stores file names with parent directory IDs, packs APFS flags, and indexes file names and directory paths separately. Existing snapshots remain readable and can be compared with new scans; their on-disk size does not change until they are replaced or deleted from History.
 
 ## Architecture
 

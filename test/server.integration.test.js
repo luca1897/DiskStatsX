@@ -258,6 +258,9 @@ test('API persists snapshots and serves indexed search and comparisons', async (
   assert.equal(historyResponse.status, 200);
   const history = await historyResponse.json();
   assert.equal(history.snapshots.length, 2);
+  assert.equal(history.storage.snapshotCount, 2);
+  assert.equal(history.storage.policy.maxSnapshots, 12);
+  assert.ok(history.storage.totalBytes > 0);
   const after = history.snapshots.find((snapshot) => snapshot.active);
   const before = history.snapshots.find((snapshot) => snapshot.id !== after.id);
 
@@ -286,6 +289,60 @@ test('API persists snapshots and serves indexed search and comparisons', async (
   const resultResponse = await fetch(`${baseUrl}/result`, { headers });
   const result = await resultResponse.json();
   assert.equal(result.children.some((entry) => entry.name === 'release-notes.txt'), false);
+
+  const activeDeleteResponse = await fetch(`${baseUrl}/history/${before.id}`, {
+    method: 'DELETE',
+    headers
+  });
+  assert.equal(activeDeleteResponse.status, 409);
+
+  const policyResponse = await fetch(`${baseUrl}/history/policy`, {
+    method: 'PUT',
+    headers: {
+      ...headers,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      maxSnapshots: 8,
+      maxBytes: 1024 * 1024 * 1024,
+      preserveLatestPerRoot: true
+    })
+  });
+  assert.equal(policyResponse.status, 200);
+  const policyResult = await policyResponse.json();
+  assert.equal(policyResult.storage.policy.maxSnapshots, 8);
+  assert.equal(policyResult.storage.policyConfigured, true);
+
+  const partialPolicyResponse = await fetch(`${baseUrl}/history/policy`, {
+    method: 'PUT',
+    headers: {
+      ...headers,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ maxSnapshots: 7 })
+  });
+  assert.equal(partialPolicyResponse.status, 200);
+  const partialPolicyResult = await partialPolicyResponse.json();
+  assert.equal(partialPolicyResult.storage.policy.maxSnapshots, 7);
+  assert.equal(partialPolicyResult.storage.policy.preserveLatestPerRoot, true);
+
+  const deleteResponse = await fetch(`${baseUrl}/history/${after.id}`, {
+    method: 'DELETE',
+    headers
+  });
+  assert.equal(deleteResponse.status, 200);
+  const deleted = await deleteResponse.json();
+  assert.equal(deleted.snapshots.length, 1);
+  assert.ok(deleted.reclaimedBytes > 0);
+
+  const clearResponse = await fetch(`${baseUrl}/history`, {
+    method: 'DELETE',
+    headers
+  });
+  assert.equal(clearResponse.status, 200);
+  const cleared = await clearResponse.json();
+  assert.equal(cleared.snapshots.length, 1);
+  assert.equal(cleared.snapshots[0].active, true);
 });
 
 test('ScanManager cancels a running native process and removes partial output', async (context) => {

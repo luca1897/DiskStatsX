@@ -138,11 +138,59 @@ class ScanManager extends EventEmitter {
   }
 
   listHistory() {
+    const protectedIds = this.history.protectedIds([this.activeSnapshot?.id]);
     return this.history.list().map((record) => ({
       ...record,
       rootPath: normalizeRootPath(record.rootPath),
-      active: record.id === this.activeSnapshot?.id
+      active: record.id === this.activeSnapshot?.id,
+      protected: protectedIds.has(record.id)
     }));
+  }
+
+  getHistory() {
+    return {
+      snapshots: this.listHistory(),
+      storage: this.history.summary([this.activeSnapshot?.id])
+    };
+  }
+
+  updateHistoryPolicy(policy) {
+    this.requireHistoryIdle();
+    const result = this.history.updatePolicy(policy, {
+      protectedIds: [this.activeSnapshot?.id]
+    });
+    return {
+      ...this.getHistory(),
+      removedCount: result.removed.length,
+      reclaimedBytes: sumResultBytes(result.removed)
+    };
+  }
+
+  deleteHistory(id) {
+    this.requireHistoryIdle();
+    const record = this.history.find(id);
+    if (!record) {
+      throw createHttpError(404, 'scan snapshot is not available');
+    }
+    if (record.id === this.activeSnapshot?.id) {
+      throw createHttpError(409, 'the active snapshot cannot be deleted');
+    }
+    const removed = this.history.remove(id);
+    return {
+      ...this.getHistory(),
+      removedCount: 1,
+      reclaimedBytes: Number(removed?.resultBytes || 0)
+    };
+  }
+
+  clearHistory() {
+    this.requireHistoryIdle();
+    const removed = this.history.clear({ exceptIds: [this.activeSnapshot?.id] });
+    return {
+      ...this.getHistory(),
+      removedCount: removed.length,
+      reclaimedBytes: sumResultBytes(removed)
+    };
   }
 
   activateHistory(id) {
@@ -158,6 +206,12 @@ class ScanManager extends EventEmitter {
     this.activateRecord(record, databasePath);
     this.publish('history-activated', { state: 'done', error: null });
     return this.snapshot;
+  }
+
+  requireHistoryIdle() {
+    if (this.process) {
+      throw createHttpError(409, 'scan history cannot be changed while scanning');
+    }
   }
 
   readDirectory(requestedPath, { signal } = {}) {
@@ -494,6 +548,10 @@ function appendSearchOption(args, flag, value) {
 
 function normalizeRootPath(rootPath) {
   return path.resolve(String(rootPath));
+}
+
+function sumResultBytes(records) {
+  return records.reduce((total, record) => total + Number(record.resultBytes || 0), 0);
 }
 
 function removeDatabase(databasePath) {

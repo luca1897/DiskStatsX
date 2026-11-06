@@ -45,6 +45,21 @@ function normalizeSearch(value) {
   };
 }
 
+function normalizeHistoryPolicy(value) {
+  const policy = value && typeof value === 'object' ? value : {};
+  const normalized = {};
+  if (Object.hasOwn(policy, 'maxSnapshots')) {
+    normalized.maxSnapshots = Number(policy.maxSnapshots);
+  }
+  if (Object.hasOwn(policy, 'maxBytes')) {
+    normalized.maxBytes = Number(policy.maxBytes);
+  }
+  if (typeof policy.preserveLatestPerRoot === 'boolean') {
+    normalized.preserveLatestPerRoot = policy.preserveLatestPerRoot;
+  }
+  return normalized;
+}
+
 function nonNegativeNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
@@ -113,7 +128,31 @@ function createApp({ scanManager, defaultScanPath = '/', publicPath, vendorPath 
   });
 
   app.get('/history', requireSession(sessionToken), (_request, response) => {
-    response.json({ snapshots: scanManager.listHistory() });
+    response.json(scanManager.getHistory());
+  });
+
+  app.put('/history/policy', requireSession(sessionToken), (request, response) => {
+    try {
+      response.json(scanManager.updateHistoryPolicy(normalizeHistoryPolicy(request.body)));
+    } catch (error) {
+      response.status(error.statusCode || 500).json({ error: error.message });
+    }
+  });
+
+  app.delete('/history/:id', requireSession(sessionToken), (request, response) => {
+    try {
+      response.json(scanManager.deleteHistory(String(request.params.id || '')));
+    } catch (error) {
+      response.status(error.statusCode || 500).json({ error: error.message });
+    }
+  });
+
+  app.delete('/history', requireSession(sessionToken), (_request, response) => {
+    try {
+      response.json(scanManager.clearHistory());
+    } catch (error) {
+      response.status(error.statusCode || 500).json({ error: error.message });
+    }
   });
 
   app.post('/history/activate', requireSession(sessionToken), (request, response) => {
@@ -280,6 +319,7 @@ function safeTokenEqual(candidate, expected) {
 module.exports = {
   createApp,
   normalizeFilters,
+  normalizeHistoryPolicy,
   normalizeSearch,
   parseHost,
   validateLocalRequest

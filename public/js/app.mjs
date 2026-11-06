@@ -44,6 +44,7 @@ class DiskStatsApp {
     this.resultAbortController = null;
     this.largestFilesSummary = null;
     this.messageTimer = null;
+    this.confirmationResolver = null;
     this.demoMode = urlParameters.has('demo');
     this.initialView = urlParameters.get('view') === 'sunburst' ? 'sunburst' : 'treemap';
     this.reviewController = new ReviewController({
@@ -74,7 +75,8 @@ class DiskStatsApp {
       elements: this.elements,
       api: this.api,
       onActivate: (status) => this.activateSnapshot(status),
-      onMessage: (message) => this.setToolbarMessage(message)
+      onMessage: (message, options) => this.setToolbarMessage(message, options),
+      onConfirm: (options) => this.confirmAction(options)
     });
     this.searchController = new SearchController({
       elements: this.elements,
@@ -180,6 +182,19 @@ class DiskStatsApp {
     this.elements.appMessageClose.addEventListener('click', () => this.hideAppMessage());
     this.elements.errorAlertClose.addEventListener('click', () => this.closeErrorAlert());
     this.elements.errorAlertConfirm.addEventListener('click', () => this.closeErrorAlert());
+    this.elements.confirmationAlertClose.addEventListener('click', () => {
+      this.resolveConfirmation(false);
+    });
+    this.elements.confirmationAlertCancel.addEventListener('click', () => {
+      this.resolveConfirmation(false);
+    });
+    this.elements.confirmationAlertConfirm.addEventListener('click', () => {
+      this.resolveConfirmation(true);
+    });
+    this.elements.confirmationAlert.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      this.resolveConfirmation(false);
+    });
 
     this.elements.form.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -558,6 +573,36 @@ class DiskStatsApp {
     if (this.elements.errorAlert.open) {
       this.elements.errorAlert.close();
     }
+  }
+
+  confirmAction({
+    title = 'Confirm action',
+    message = '',
+    confirmLabel = 'Confirm',
+    danger = false
+  } = {}) {
+    if (this.confirmationResolver || this.elements.confirmationAlert.open) {
+      return Promise.resolve(false);
+    }
+    this.elements.confirmationAlertTitle.textContent = title;
+    this.elements.confirmationAlertMessage.textContent = message;
+    this.elements.confirmationAlertConfirm.textContent = confirmLabel;
+    this.elements.confirmationAlertConfirm.classList.toggle('dialog-danger', danger);
+    this.elements.confirmationAlertConfirm.classList.toggle('dialog-primary', !danger);
+    this.elements.confirmationAlert.showModal();
+    this.elements.confirmationAlertCancel.focus();
+    return new Promise((resolve) => {
+      this.confirmationResolver = resolve;
+    });
+  }
+
+  resolveConfirmation(confirmed) {
+    const resolve = this.confirmationResolver;
+    this.confirmationResolver = null;
+    if (this.elements.confirmationAlert.open) {
+      this.elements.confirmationAlert.close();
+    }
+    resolve?.(confirmed);
   }
 
   showEmptyState(title, description) {

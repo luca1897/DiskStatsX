@@ -2,6 +2,7 @@
 
 #include "scanner.h"
 
+#include <CommonCrypto/CommonDigest.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -38,6 +39,11 @@
 #define QUERY_SECOND_LEVEL_FILE_LIMIT 48
 #define GLOBAL_LARGEST_FILE_LIMIT 10
 #define BRANCH_LARGEST_FILE_LIMIT 3
+#define PATH_HASH_BYTES 16
+#define FILE_FLAG_CLOUD_ONLY 1
+#define FILE_FLAG_HARDLINK_DUPLICATE 2
+#define FILE_FLAG_CLONE_DUPLICATE 4
+#define FILE_FLAG_SHARED_BLOCKS 8
 
 typedef struct EntryAttrs {
     const char *name;
@@ -112,6 +118,7 @@ typedef struct ScanDatabase {
     sqlite3_stmt *update_directory;
     sqlite3_stmt *insert_file;
     sqlite3_stmt *insert_metadata;
+    sqlite3_stmt *insert_directory_search;
     LargestFile largest_files[GLOBAL_LARGEST_FILE_LIMIT];
     size_t largest_file_count;
     BranchLargestFiles *branch_largest_files;
@@ -166,6 +173,12 @@ static IdentitySet g_hardlinks = {0};
 static IdentitySet g_clones = {0};
 
 static void *xcalloc(size_t count, size_t size);
+
+static void path_hash(const char *path, unsigned char output[PATH_HASH_BYTES]) {
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(path, (CC_LONG)strlen(path), digest);
+    memcpy(output, digest, PATH_HASH_BYTES);
+}
 
 static uint64_t mix_u64(uint64_t value) {
     value ^= value >> 30;
@@ -714,8 +727,7 @@ static sqlite3_int64 database_insert_directory(ScanDatabase *database,
                                                sqlite3_int64 parent_id,
                                                bool has_parent,
                                                const char *name,
-                                               const char *path,
-                                               int64_t modified_at);
+                                               const char *path);
 static void database_update_directory(ScanDatabase *database,
                                       sqlite3_int64 id,
                                       const DirectoryAggregate *aggregate);
@@ -885,8 +897,7 @@ static DirectoryAggregate scan_directory_fd(ScanDatabase *database,
                                                                     directory_id,
                                                                     true,
                                                                     attrs.name,
-                                                                    child_path,
-                                                                    attrs.modified_at);
+                                                                    child_path);
                 sqlite3_int64 child_root_branch_id = directory_id == root_directory_id
                     ? child_id
                     : root_branch_id;
@@ -961,8 +972,7 @@ static sqlite3_int64 database_insert_directory(ScanDatabase *database,
                                                sqlite3_int64 parent_id,
                                                bool has_parent,
                                                const char *name,
-                                               const char *path,
-                                               int64_t modified_at) {
+                                               const char *path) {
     sqlite3_reset(database->insert_directory);
     sqlite3_clear_bindings(database->insert_directory);
     if (has_parent) {
@@ -971,12 +981,21 @@ static sqlite3_int64 database_insert_directory(ScanDatabase *database,
         sqlite3_bind_null(database->insert_directory, 1);
     }
     sqlite3_bind_text(database->insert_directory, 2, name, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(database->insert_directory, 3, path, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(database->insert_directory, 4, modified_at);
+    unsigned char digest[PATH_HASH_BYTES];
+    path_hash(path, digest);
+    sqlite3_bind_blob(database->insert_directory, 3, digest, PATH_HASH_BYTES, SQLITE_TRANSIENT);
     if (sqlite3_step(database->insert_directory) != SQLITE_DONE) {
         sqlite_fail(database->handle, "could not index directory");
     }
-    return sqlite3_last_insert_rowid(database->handle);
+    sqlite3_int64 id = sqlite3_last_insert_rowid(database->handle);
+    sqlite3_reset(database->insert_directory_search);
+    sqlite3_clear_bindings(database->insert_directory_search);
+    sqlite3_bind_int64(database->insert_directory_search, 1, id);
+    sqlite3_bind_text(database->insert_directory_search, 2, path, -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(database->insert_directory_search) != SQLITE_DONE) {
+        sqlite_fail(database->handle, "could not index directory path");
+    }
+    return id;
 }
 
 static void database_update_directory(ScanDatabase *database,
@@ -1015,21 +1034,20 @@ static void database_insert_file(ScanDatabase *database,
     sqlite3_clear_bindings(database->insert_file);
     sqlite3_bind_int64(database->insert_file, 1, parent_id);
     sqlite3_bind_text(database->insert_file, 2, name, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(database->insert_file, 3, path, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(database->insert_file, 4, modified_at);
-    sqlite3_bind_int64(database->insert_file, 5, (sqlite3_int64)size);
-    sqlite3_bind_int64(database->insert_file, 6, (sqlite3_int64)logical_size);
-    sqlite3_bind_int64(database->insert_file, 7, (sqlite3_int64)allocated_size);
-    sqlite3_bind_int(database->insert_file, 8, cloud_only);
-    sqlite3_bind_int(database->insert_file, 9, hardlink_duplicate);
-    sqlite3_bind_int(database->insert_file, 10, clone_duplicate);
-    sqlite3_bind_int(database->insert_file, 11, shared_blocks);
-    sqlite3_bind_int(database->insert_file, 12, (int)clone_refcount);
-    if (root_branch_id > 0) {
-        sqlite3_bind_int64(database->insert_file, 13, root_branch_id);
+    sqlite3_bind_int64(database->insert_file, 3, modified_at);
+    sqlite3_bind_int64(database->insert_file, 4, (sqlite3_int64)size);
+    sqlite3_bind_int64(database->insert_file, 5, (sqlite3_int64)logical_size);
+    if (allocated_size == size) {
+        sqlite3_bind_null(database->insert_file, 6);
     } else {
-        sqlite3_bind_null(database->insert_file, 13);
+        sqlite3_bind_int64(database->insert_file, 6, (sqlite3_int64)allocated_size);
     }
+    int flags = (cloud_only ? FILE_FLAG_CLOUD_ONLY : 0) |
+        (hardlink_duplicate ? FILE_FLAG_HARDLINK_DUPLICATE : 0) |
+        (clone_duplicate ? FILE_FLAG_CLONE_DUPLICATE : 0) |
+        (shared_blocks ? FILE_FLAG_SHARED_BLOCKS : 0);
+    sqlite3_bind_int(database->insert_file, 7, flags);
+    sqlite3_bind_int(database->insert_file, 8, (int)clone_refcount);
     if (sqlite3_step(database->insert_file) != SQLITE_DONE) {
         sqlite_fail(database->handle, "could not index file");
     }
@@ -1140,8 +1158,7 @@ static DirectoryAggregate write_scan_database(const char *database_path,
                         "id INTEGER PRIMARY KEY,"
                         "parent_id INTEGER,"
                         "name TEXT NOT NULL,"
-                        "path TEXT NOT NULL,"
-                        "modified_at INTEGER NOT NULL DEFAULT 0,"
+                        "path_hash BLOB NOT NULL,"
                         "size INTEGER NOT NULL,"
                         "logical_size INTEGER NOT NULL,"
                         "direct_file_size INTEGER NOT NULL,"
@@ -1154,35 +1171,35 @@ static DirectoryAggregate write_scan_database(const char *database_path,
                         "id INTEGER PRIMARY KEY,"
                         "parent_id INTEGER NOT NULL,"
                         "name TEXT NOT NULL,"
-                        "path TEXT NOT NULL,"
                         "modified_at INTEGER NOT NULL DEFAULT 0,"
                         "size INTEGER NOT NULL,"
                         "logical_size INTEGER NOT NULL,"
-                        "allocated_size INTEGER NOT NULL,"
-                        "cloud_only INTEGER NOT NULL DEFAULT 0,"
-                        "hardlink_duplicate INTEGER NOT NULL DEFAULT 0,"
-                        "clone_duplicate INTEGER NOT NULL DEFAULT 0,"
-                        "shared_blocks INTEGER NOT NULL DEFAULT 0,"
-                        "clone_refcount INTEGER NOT NULL DEFAULT 0,"
-                        "root_branch_id INTEGER"
+                        "allocated_size INTEGER,"
+                        "flags INTEGER NOT NULL DEFAULT 0,"
+                        "clone_refcount INTEGER NOT NULL DEFAULT 0"
+                        ");"
+                        "CREATE VIRTUAL TABLE directory_search USING fts5("
+                        "path,content='',detail=none,columnsize=0,"
+                        "tokenize='unicode61 remove_diacritics 2'"
                         ");"
                         "BEGIN IMMEDIATE;",
                         "could not initialize scan database");
 
     const char *directory_sql =
         "INSERT INTO directories("
-        "parent_id,name,path,modified_at,size,logical_size,direct_file_size,file_count,directory_count,"
+        "parent_id,name,path_hash,size,logical_size,direct_file_size,file_count,directory_count,"
         "direct_file_count,direct_directory_count"
-        ") VALUES(?,?,?,?,0,0,0,0,0,0,0)";
+        ") VALUES(?,?,?,0,0,0,0,0,0,0)";
     const char *directory_update_sql =
         "UPDATE directories SET size=?,logical_size=?,direct_file_size=?,file_count=?,"
         "directory_count=?,direct_file_count=?,direct_directory_count=? WHERE id=?";
     const char *file_sql =
         "INSERT INTO files("
-        "parent_id,name,path,modified_at,size,logical_size,allocated_size,cloud_only,"
-        "hardlink_duplicate,clone_duplicate,shared_blocks,clone_refcount,root_branch_id"
-        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)";
+        "parent_id,name,modified_at,size,logical_size,allocated_size,flags,clone_refcount"
+        ") VALUES(?,?,?,?,?,?,?,?)";
     const char *metadata_sql = "INSERT INTO metadata(key,value) VALUES(?,?)";
+    const char *directory_search_sql =
+        "INSERT INTO directory_search(rowid,path) VALUES(?,?)";
     if (sqlite3_prepare_v2(database.handle,
                            directory_sql,
                            -1,
@@ -1202,6 +1219,11 @@ static DirectoryAggregate write_scan_database(const char *database_path,
                            metadata_sql,
                            -1,
                            &database.insert_metadata,
+                           NULL) != SQLITE_OK ||
+        sqlite3_prepare_v2(database.handle,
+                           directory_search_sql,
+                           -1,
+                           &database.insert_directory_search,
                            NULL) != SQLITE_OK) {
         sqlite_fail(database.handle, "could not prepare scan database");
     }
@@ -1210,8 +1232,7 @@ static DirectoryAggregate write_scan_database(const char *database_path,
                                                        0,
                                                        false,
                                                        root_display_name(root_path),
-                                                       root_path,
-                                                       0);
+                                                       root_path);
     DirectoryAggregate root = scan_directory_fd(&database,
                                                 root_id,
                                                 root_id,
@@ -1225,7 +1246,7 @@ static DirectoryAggregate write_scan_database(const char *database_path,
     database_update_directory(&database, root_id, &root);
 
     const char *metadata[][2] = {
-        {"schema_version", "7"},
+        {"schema_version", "8"},
         {"root_path", root_path}
     };
     for (size_t i = 0; i < sizeof(metadata) / sizeof(metadata[0]); i++) {
@@ -1264,6 +1285,7 @@ static DirectoryAggregate write_scan_database(const char *database_path,
     sqlite3_finalize(summary_statement);
 
     sqlite3_finalize(database.insert_metadata);
+    sqlite3_finalize(database.insert_directory_search);
     sqlite3_finalize(database.insert_file);
     sqlite3_finalize(database.update_directory);
     sqlite3_finalize(database.insert_directory);
@@ -1273,13 +1295,10 @@ static DirectoryAggregate write_scan_database(const char *database_path,
     sqlite_exec_checked(database.handle,
                         "COMMIT;"
                         "BEGIN IMMEDIATE;"
-                        "CREATE UNIQUE INDEX directories_path ON directories(path);"
+                        "CREATE UNIQUE INDEX directories_hash ON directories(path_hash);"
                         "CREATE INDEX directories_parent_size ON directories(parent_id,size DESC);"
                         "CREATE INDEX files_parent_size ON files(parent_id,size DESC);"
                         "CREATE INDEX files_size ON files(size DESC);"
-                        "CREATE INDEX files_root_branch_size ON files(root_branch_id,size DESC);"
-                        "CREATE INDEX files_name_size ON files(name COLLATE NOCASE,size DESC);"
-                        "CREATE INDEX files_modified_size ON files(modified_at DESC,size DESC);"
                         "CREATE TABLE largest_files("
                         "scope TEXT NOT NULL,"
                         "root_branch_id INTEGER,"
@@ -1314,11 +1333,11 @@ static DirectoryAggregate write_scan_database(const char *database_path,
     sqlite_exec_checked(database.handle,
                         "BEGIN IMMEDIATE;"
                         "CREATE VIRTUAL TABLE file_search USING fts5("
-                        "name,path,content='files',content_rowid='id',"
+                        "name,content='',detail=none,columnsize=0,"
                         "tokenize='unicode61 remove_diacritics 2'"
                         ");"
-                        "INSERT INTO file_search(rowid,name,path) "
-                        "SELECT id,name,path FROM files;"
+                        "INSERT INTO file_search(rowid,name) "
+                        "SELECT id,name FROM files;"
                         "COMMIT;",
                         "could not build search index");
 
@@ -1363,7 +1382,8 @@ static DirectoryRow directory_row_from_statement(sqlite3_stmt *statement) {
     row.has_parent = sqlite3_column_type(statement, 1) != SQLITE_NULL;
     row.parent_id = row.has_parent ? sqlite3_column_int64(statement, 1) : 0;
     row.name = xstrdup((const char *)sqlite3_column_text(statement, 2));
-    row.path = xstrdup((const char *)sqlite3_column_text(statement, 3));
+    const char *stored_path = (const char *)sqlite3_column_text(statement, 3);
+    row.path = stored_path ? xstrdup(stored_path) : NULL;
     row.size = (uint64_t)sqlite3_column_int64(statement, 4);
     row.logical_size = (uint64_t)sqlite3_column_int64(statement, 5);
     row.direct_file_size = (uint64_t)sqlite3_column_int64(statement, 6);
@@ -1374,23 +1394,110 @@ static DirectoryRow directory_row_from_statement(sqlite3_stmt *statement) {
     return row;
 }
 
+static bool compact_snapshot(sqlite3 *database) {
+    sqlite3_stmt *statement = NULL;
+    if (sqlite3_prepare_v2(database,
+                           "SELECT path_hash FROM directories LIMIT 0",
+                           -1,
+                           &statement,
+                           NULL) != SQLITE_OK) {
+        return false;
+    }
+    sqlite3_finalize(statement);
+    return true;
+}
+
+static char *snapshot_root_path(sqlite3 *database, const char *schema) {
+    sqlite3_stmt *statement = NULL;
+    char sql[128];
+    snprintf(sql, sizeof(sql),
+             "SELECT value FROM %s.metadata WHERE key='root_path'", schema);
+    if (sqlite3_prepare_v2(database,
+                           sql,
+                           -1,
+                           &statement,
+                           NULL) != SQLITE_OK) {
+        sqlite_fail(database, "could not read scan root");
+    }
+    char *root = NULL;
+    if (sqlite3_step(statement) == SQLITE_ROW) {
+        root = xstrdup((const char *)sqlite3_column_text(statement, 0));
+    }
+    sqlite3_finalize(statement);
+    if (!root) {
+        die("scan index is missing its root path");
+    }
+    return root;
+}
+
+static char *directory_path_from_id(sqlite3 *database,
+                                    const char *schema,
+                                    sqlite3_int64 id) {
+    char sql[128];
+    snprintf(sql, sizeof(sql),
+             "SELECT parent_id,name FROM %s.directories WHERE id=?", schema);
+    sqlite3_stmt *statement = NULL;
+    if (sqlite3_prepare_v2(database, sql, -1, &statement, NULL) != SQLITE_OK) {
+        sqlite_fail(database, "could not prepare directory path query");
+    }
+    char **parts = NULL;
+    size_t count = 0;
+    size_t capacity = 0;
+    while (id > 0) {
+        sqlite3_reset(statement);
+        sqlite3_clear_bindings(statement);
+        sqlite3_bind_int64(statement, 1, id);
+        if (sqlite3_step(statement) != SQLITE_ROW) {
+            sqlite3_finalize(statement);
+            die("scan index contains an incomplete directory path");
+        }
+        if (sqlite3_column_type(statement, 0) == SQLITE_NULL) {
+            break;
+        }
+        if (count == capacity) {
+            capacity = capacity ? capacity * 2 : 16;
+            parts = xrealloc(parts, capacity * sizeof(*parts));
+        }
+        parts[count++] = xstrdup((const char *)sqlite3_column_text(statement, 1));
+        id = sqlite3_column_int64(statement, 0);
+    }
+    sqlite3_finalize(statement);
+    char *result = snapshot_root_path(database, schema);
+    while (count > 0) {
+        char *next = join_path(result, parts[--count]);
+        free(parts[count]);
+        free(result);
+        result = next;
+    }
+    free(parts);
+    return result;
+}
+
 static bool load_directory(sqlite3 *database,
                            const char *column,
                            const char *path,
                            sqlite3_int64 id,
                            DirectoryRow *row) {
     char sql[512];
+    bool compact = compact_snapshot(database);
     snprintf(sql,
              sizeof(sql),
-             "SELECT id,parent_id,name,path,size,logical_size,direct_file_size,file_count,directory_count,"
+             "SELECT id,parent_id,name,%s,size,logical_size,direct_file_size,file_count,directory_count,"
              "direct_file_count,direct_directory_count FROM directories WHERE %s=?",
-             column);
+             compact ? "NULL" : "path",
+             compact && path ? "path_hash" : column);
     sqlite3_stmt *statement = NULL;
     if (sqlite3_prepare_v2(database, sql, -1, &statement, NULL) != SQLITE_OK) {
         sqlite_fail(database, "could not prepare directory query");
     }
     if (path) {
-        sqlite3_bind_text(statement, 1, path, -1, SQLITE_TRANSIENT);
+        if (compact) {
+            unsigned char digest[PATH_HASH_BYTES];
+            path_hash(path, digest);
+            sqlite3_bind_blob(statement, 1, digest, PATH_HASH_BYTES, SQLITE_TRANSIENT);
+        } else {
+            sqlite3_bind_text(statement, 1, path, -1, SQLITE_TRANSIENT);
+        }
     } else {
         sqlite3_bind_int64(statement, 1, id);
     }
@@ -1399,25 +1506,40 @@ static bool load_directory(sqlite3 *database,
         *row = directory_row_from_statement(statement);
     }
     sqlite3_finalize(statement);
+    if (found && compact) {
+        row->path = directory_path_from_id(database, "main", row->id);
+        if (path && strcmp(row->path, path) != 0) {
+            directory_row_free(row);
+            found = false;
+        }
+    }
     return found;
 }
 
 static DirectoryRowList load_child_directories(sqlite3 *database,
                                                 sqlite3_int64 parent_id,
+                                                const char *parent_path,
                                                 int limit) {
     DirectoryRowList list = {0};
     sqlite3_stmt *statement = NULL;
-    const char *sql =
-        "SELECT id,parent_id,name,path,size,logical_size,direct_file_size,file_count,directory_count,"
-        "direct_file_count,direct_directory_count "
-        "FROM directories WHERE parent_id=? ORDER BY size DESC,name LIMIT ?";
+    const char *sql = compact_snapshot(database)
+        ? "SELECT id,parent_id,name,NULL,size,logical_size,direct_file_size,file_count,"
+          "directory_count,direct_file_count,direct_directory_count "
+          "FROM directories WHERE parent_id=? ORDER BY size DESC,name LIMIT ?"
+        : "SELECT id,parent_id,name,path,size,logical_size,direct_file_size,file_count,"
+          "directory_count,direct_file_count,direct_directory_count "
+          "FROM directories WHERE parent_id=? ORDER BY size DESC,name LIMIT ?";
     if (sqlite3_prepare_v2(database, sql, -1, &statement, NULL) != SQLITE_OK) {
         sqlite_fail(database, "could not prepare child directory query");
     }
     sqlite3_bind_int64(statement, 1, parent_id);
     sqlite3_bind_int(statement, 2, limit);
     while (sqlite3_step(statement) == SQLITE_ROW) {
-        directory_row_list_add(&list, directory_row_from_statement(statement));
+        DirectoryRow row = directory_row_from_statement(statement);
+        if (!row.path) {
+            row.path = join_path(parent_path, row.name);
+        }
+        directory_row_list_add(&list, row);
     }
     sqlite3_finalize(statement);
     return list;
@@ -1535,6 +1657,7 @@ static void write_directory_children(FILE *out,
                                      int expanded_directory_limit) {
     DirectoryRowList children = load_child_directories(database,
                                                        parent->id,
+                                                       parent->path,
                                                        directory_limit);
     bool needs_comma = false;
     uint64_t included_directory_size = 0;
@@ -1563,11 +1686,19 @@ static void write_directory_children(FILE *out,
     }
 
     sqlite3_stmt *files = NULL;
-    const char *file_sql =
+    const char *legacy_file_sql =
         "SELECT name,size,logical_size,allocated_size,cloud_only,"
         "hardlink_duplicate,clone_duplicate,shared_blocks,clone_refcount,modified_at "
         "FROM files WHERE parent_id=? ORDER BY size DESC,name LIMIT ?";
-    if (sqlite3_prepare_v2(database, file_sql, -1, &files, NULL) != SQLITE_OK) {
+    const char *compact_file_sql =
+        "SELECT name,size,logical_size,COALESCE(allocated_size,size),(flags & 1)!=0,"
+        "(flags & 2)!=0,(flags & 4)!=0,(flags & 8)!=0,clone_refcount,modified_at "
+        "FROM files WHERE parent_id=? ORDER BY size DESC,name LIMIT ?";
+    if (sqlite3_prepare_v2(database,
+                           compact_snapshot(database) ? compact_file_sql : legacy_file_sql,
+                           -1,
+                           &files,
+                           NULL) != SQLITE_OK) {
         directory_row_list_free(&children);
         sqlite_fail(database, "could not prepare file query");
     }
@@ -1687,7 +1818,8 @@ static void close_largest_file_branch(FILE *out,
 
 static void write_largest_files_summary(FILE *out,
                                         sqlite3 *database,
-                                        sqlite3_int64 root_id) {
+                                        sqlite3_int64 root_id,
+                                        const char *root_path) {
     sqlite3_stmt *global = NULL;
     const char *global_sql =
         "SELECT name,path,size,logical_size,allocated_size,cloud_only FROM largest_files "
@@ -1720,7 +1852,7 @@ static void write_largest_files_summary(FILE *out,
 
     sqlite3_stmt *branches = NULL;
     const char *branch_sql =
-        "SELECT d.id,d.name,d.path,s.file_count,s.file_size,"
+        "SELECT d.id,d.name,s.file_count,s.file_size,"
         "lf.rank,lf.name,lf.path,lf.size,lf.logical_size,lf.allocated_size,lf.cloud_only "
         "FROM directories d "
         "JOIN branch_file_summary s ON s.root_branch_id=d.id "
@@ -1758,9 +1890,10 @@ static void write_largest_files_summary(FILE *out,
                 fputc(',', out);
             }
             current_branch_id = branch_id;
-            current_branch_path = xstrdup((const char *)sqlite3_column_text(branches, 2));
-            total_count = (uint64_t)sqlite3_column_int64(branches, 3);
-            total_size = (uint64_t)sqlite3_column_int64(branches, 4);
+            current_branch_path = join_path(root_path,
+                                            (const char *)sqlite3_column_text(branches, 1));
+            total_count = (uint64_t)sqlite3_column_int64(branches, 2);
+            total_size = (uint64_t)sqlite3_column_int64(branches, 3);
             included_count = 0;
             included_size = 0;
             file_comma = false;
@@ -1772,18 +1905,18 @@ static void write_largest_files_summary(FILE *out,
             branch_comma = true;
         }
 
-        if (sqlite3_column_type(branches, 5) != SQLITE_NULL) {
+        if (sqlite3_column_type(branches, 4) != SQLITE_NULL) {
             if (file_comma) {
                 fputc(',', out);
             }
-            uint64_t size = (uint64_t)sqlite3_column_int64(branches, 8);
+            uint64_t size = (uint64_t)sqlite3_column_int64(branches, 7);
             write_file_json(out,
+                            (const char *)sqlite3_column_text(branches, 5),
                             (const char *)sqlite3_column_text(branches, 6),
-                            (const char *)sqlite3_column_text(branches, 7),
                             size,
+                            (uint64_t)sqlite3_column_int64(branches, 8),
                             (uint64_t)sqlite3_column_int64(branches, 9),
-                            (uint64_t)sqlite3_column_int64(branches, 10),
-                            sqlite3_column_int(branches, 11) != 0,
+                            sqlite3_column_int(branches, 10) != 0,
                             false,
                             false,
                             false,
@@ -1878,7 +2011,7 @@ static void query_database(const char *database_path, const char *requested_path
                              QUERY_EXPANDED_DIRECTORY_LIMIT);
     fputc(']', stdout);
     if (!current.has_parent) {
-        write_largest_files_summary(stdout, database, current.id);
+        write_largest_files_summary(stdout, database, current.id, current.path);
     }
     fputs("}\n", stdout);
     fflush(stdout);
@@ -1945,6 +2078,99 @@ static char *sqlite_fts_prefix_query(const char *value) {
     return query;
 }
 
+typedef struct SearchTokens {
+    char **values;
+    size_t count;
+    size_t capacity;
+} SearchTokens;
+
+static SearchTokens search_tokens(const char *term) {
+    SearchTokens tokens = {0};
+    const unsigned char *cursor = (const unsigned char *)term;
+    while (*cursor) {
+        while (*cursor && !isalnum(*cursor) && *cursor < 0x80) {
+            cursor++;
+        }
+        const unsigned char *start = cursor;
+        while (*cursor && (isalnum(*cursor) || *cursor >= 0x80)) {
+            cursor++;
+        }
+        size_t length = (size_t)(cursor - start);
+        if (length == 0) {
+            continue;
+        }
+        char *value = xcalloc(length + 1, 1);
+        memcpy(value, start, length);
+        bool duplicate = false;
+        for (size_t index = 0; index < tokens.count; index++) {
+            if (strcasecmp(tokens.values[index], value) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            free(value);
+            continue;
+        }
+        if (tokens.count == tokens.capacity) {
+            tokens.capacity = tokens.capacity ? tokens.capacity * 2 : 8;
+            tokens.values = xrealloc(tokens.values,
+                                     tokens.capacity * sizeof(*tokens.values));
+        }
+        tokens.values[tokens.count++] = value;
+    }
+    return tokens;
+}
+
+static void search_tokens_free(SearchTokens *tokens) {
+    for (size_t index = 0; index < tokens->count; index++) {
+        free(tokens->values[index]);
+    }
+    free(tokens->values);
+}
+
+static char *compact_search_sql(sqlite3 *database, const SearchTokens *tokens) {
+    sqlite3_str *sql = sqlite3_str_new(database);
+    if (tokens->count > 0) {
+        sqlite3_str_appendall(sql,
+            "WITH candidates(id) AS ("
+            "SELECT rowid FROM file_search WHERE file_search MATCH ?1 "
+            "UNION SELECT f.id FROM files f WHERE f.parent_id IN ("
+            "SELECT rowid FROM directory_search WHERE directory_search MATCH ?1)) ");
+    }
+    sqlite3_str_appendall(sql,
+        "SELECT f.name,d.id,f.size,f.logical_size,"
+        "COALESCE(f.allocated_size,f.size),f.modified_at,"
+        "(f.flags & 1)!=0,(f.flags & 2)!=0,(f.flags & 4)!=0,(f.flags & 8)!=0,"
+        "f.clone_refcount FROM ");
+    sqlite3_str_appendall(sql, tokens->count > 0
+        ? "candidates c JOIN files f ON f.id=c.id "
+        : "files f ");
+    sqlite3_str_appendall(sql, "JOIN directories d ON d.id=f.parent_id WHERE ");
+    for (size_t index = 1; index < tokens->count; index++) {
+        sqlite3_str_appendf(sql,
+            "(f.id IN (SELECT rowid FROM file_search WHERE file_search MATCH ?%d) "
+            "OR f.parent_id IN (SELECT rowid FROM directory_search "
+            "WHERE directory_search MATCH ?%d)) AND ",
+            (int)index + 1,
+            (int)index + 1);
+    }
+    sqlite3_str_appendall(sql,
+        "(:min_size=0 OR f.size>=:min_size) "
+        "AND (:max_size=0 OR f.size<=:max_size) "
+        "AND (:modified_after=0 OR f.modified_at>=:modified_after) "
+        "AND (:modified_before=0 OR f.modified_at<=:modified_before) "
+        "AND (:extension='' OR f.name LIKE :extension_pattern ESCAPE '\\' COLLATE NOCASE) "
+        "AND (:cloud_only=0 OR (f.flags & 1)!=0) "
+        "AND (:shared_blocks=0 OR (f.flags & 8)!=0) "
+        "ORDER BY f.size DESC,f.name COLLATE NOCASE LIMIT :limit");
+    char *result = sqlite3_str_finish(sql);
+    if (!result) {
+        die("could not construct search query");
+    }
+    return result;
+}
+
 static uint64_t parse_u64_argument(const char *value, const char *name) {
     char *end = NULL;
     errno = 0;
@@ -1992,7 +2218,22 @@ static void query_search(const char *database_path, const SearchOptions *options
     char *term_query = sqlite_fts_prefix_query(term);
     char *term_pattern = NULL;
     char *extension_pattern = sqlite_like_pattern(extension, true);
+    bool compact = sqlite_table_exists(database, "directory_search");
     bool has_full_text_index = sqlite_table_exists(database, "file_search");
+    SearchTokens tokens = compact ? search_tokens(term) : (SearchTokens){0};
+    size_t seed = 0;
+    for (size_t index = 1; index < tokens.count; index++) {
+        if (strlen(tokens.values[index]) > strlen(tokens.values[seed])) {
+            seed = index;
+        }
+    }
+    if (tokens.count > 0) {
+        char *longest = tokens.values[seed];
+        memmove(tokens.values + 1,
+                tokens.values,
+                seed * sizeof(*tokens.values));
+        tokens.values[0] = longest;
+    }
     const char *indexed_sql =
         "SELECT f.name,f.path,f.size,f.logical_size,f.allocated_size,f.modified_at,f.cloud_only,"
         "f.hardlink_duplicate,f.clone_duplicate,f.shared_blocks,f.clone_refcount "
@@ -2019,8 +2260,10 @@ static void query_search(const char *database_path, const SearchOptions *options
         "AND (?9=0 OR cloud_only=1) "
         "AND (?10=0 OR shared_blocks=1) "
         "ORDER BY size DESC,name COLLATE NOCASE LIMIT ?11";
-    const char *sql = has_full_text_index ? indexed_sql : legacy_sql;
-    if (!has_full_text_index) {
+    char *compact_sql = compact ? compact_search_sql(database, &tokens) : NULL;
+    const char *sql = compact ? compact_sql :
+        has_full_text_index ? indexed_sql : legacy_sql;
+    if (!compact && !has_full_text_index) {
         term_pattern = sqlite_like_pattern(term, false);
     }
     sqlite3_stmt *statement = NULL;
@@ -2028,33 +2271,76 @@ static void query_search(const char *database_path, const SearchOptions *options
         free(term_query);
         free(term_pattern);
         free(extension_pattern);
+        search_tokens_free(&tokens);
+        sqlite3_free(compact_sql);
         sqlite_fail(database, "could not prepare search query");
     }
-    sqlite3_bind_text(statement, 1, term, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement,
-                      2,
-                      has_full_text_index ? term_query : term_pattern,
-                      -1,
-                      SQLITE_TRANSIENT);
-    sqlite3_bind_int64(statement, 3, (sqlite3_int64)options->min_size);
-    sqlite3_bind_int64(statement, 4, (sqlite3_int64)options->max_size);
-    sqlite3_bind_int64(statement, 5, options->modified_after);
-    sqlite3_bind_int64(statement, 6, options->modified_before);
-    sqlite3_bind_text(statement, 7, extension, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement, 8, extension_pattern, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(statement, 9, options->cloud_only ? 1 : 0);
-    sqlite3_bind_int(statement, 10, options->shared_blocks ? 1 : 0);
-    sqlite3_bind_int(statement, 11, options->limit);
+    if (compact) {
+        for (size_t index = 0; index < tokens.count; index++) {
+            char *query = sqlite_fts_prefix_query(tokens.values[index]);
+            sqlite3_bind_text(statement, (int)index + 1, query, -1, SQLITE_TRANSIENT);
+            free(query);
+        }
+        sqlite3_bind_int64(statement,
+                           sqlite3_bind_parameter_index(statement, ":min_size"),
+                           (sqlite3_int64)options->min_size);
+        sqlite3_bind_int64(statement,
+                           sqlite3_bind_parameter_index(statement, ":max_size"),
+                           (sqlite3_int64)options->max_size);
+        sqlite3_bind_int64(statement,
+                           sqlite3_bind_parameter_index(statement, ":modified_after"),
+                           options->modified_after);
+        sqlite3_bind_int64(statement,
+                           sqlite3_bind_parameter_index(statement, ":modified_before"),
+                           options->modified_before);
+        sqlite3_bind_text(statement,
+                          sqlite3_bind_parameter_index(statement, ":extension"),
+                          extension, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement,
+                          sqlite3_bind_parameter_index(statement, ":extension_pattern"),
+                          extension_pattern, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(statement,
+                         sqlite3_bind_parameter_index(statement, ":cloud_only"),
+                         options->cloud_only ? 1 : 0);
+        sqlite3_bind_int(statement,
+                         sqlite3_bind_parameter_index(statement, ":shared_blocks"),
+                         options->shared_blocks ? 1 : 0);
+        sqlite3_bind_int(statement,
+                         sqlite3_bind_parameter_index(statement, ":limit"),
+                         options->limit);
+    } else {
+        sqlite3_bind_text(statement, 1, term, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 2,
+                          has_full_text_index ? term_query : term_pattern,
+                          -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(statement, 3, (sqlite3_int64)options->min_size);
+        sqlite3_bind_int64(statement, 4, (sqlite3_int64)options->max_size);
+        sqlite3_bind_int64(statement, 5, options->modified_after);
+        sqlite3_bind_int64(statement, 6, options->modified_before);
+        sqlite3_bind_text(statement, 7, extension, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 8, extension_pattern, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(statement, 9, options->cloud_only ? 1 : 0);
+        sqlite3_bind_int(statement, 10, options->shared_blocks ? 1 : 0);
+        sqlite3_bind_int(statement, 11, options->limit);
+    }
 
     fputs("{\"results\":[", stdout);
     bool needs_comma = false;
     while (sqlite3_step(statement) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(statement, 0);
+        const char *stored_path = compact
+            ? NULL
+            : (const char *)sqlite3_column_text(statement, 1);
+        char *directory_path = compact
+            ? directory_path_from_id(database, "main", sqlite3_column_int64(statement, 1))
+            : NULL;
+        char *file_path = compact ? join_path(directory_path, name) : NULL;
         if (needs_comma) {
             fputc(',', stdout);
         }
         write_file_json(stdout,
-                        (const char *)sqlite3_column_text(statement, 0),
-                        (const char *)sqlite3_column_text(statement, 1),
+                        name,
+                        compact ? file_path : stored_path,
                         (uint64_t)sqlite3_column_int64(statement, 2),
                         (uint64_t)sqlite3_column_int64(statement, 3),
                         (uint64_t)sqlite3_column_int64(statement, 4),
@@ -2064,6 +2350,8 @@ static void query_search(const char *database_path, const SearchOptions *options
                         sqlite3_column_int(statement, 9) != 0,
                         (uint32_t)sqlite3_column_int(statement, 10),
                         (int64_t)sqlite3_column_int64(statement, 5));
+        free(file_path);
+        free(directory_path);
         needs_comma = true;
     }
     fprintf(stdout, "],\"limit\":%d}\n", options->limit);
@@ -2072,6 +2360,8 @@ static void query_search(const char *database_path, const SearchOptions *options
     free(term_query);
     free(term_pattern);
     free(extension_pattern);
+    search_tokens_free(&tokens);
+    sqlite3_free(compact_sql);
     sqlite3_close(database);
 }
 
@@ -2113,11 +2403,12 @@ static const char *cleanup_category(const char *name,
 
 static void write_cleanup_file_json(FILE *out,
                                     sqlite3_stmt *statement,
+                                    const char *path,
                                     const char *category) {
     fputs("{\"name\":", out);
     json_write_escaped(out, (const char *)sqlite3_column_text(statement, 0));
     fputs(",\"path\":", out);
-    json_write_escaped(out, (const char *)sqlite3_column_text(statement, 1));
+    json_write_escaped(out, path);
     fprintf(out,
             ",\"size\":%llu,\"logicalSize\":%llu,\"allocatedSize\":%llu,"
             "\"modifiedAt\":%lld,\"type\":\"file\",\"cloudOnly\":%s,"
@@ -2137,12 +2428,23 @@ static void query_cleanup(const char *database_path, int limit, int64_t old_down
     if (sqlite3_open_v2(database_path, &database, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
         sqlite_fail(database, "could not open scan database");
     }
-    const char *sql =
+    bool compact = compact_snapshot(database);
+    const char *legacy_sql =
         "SELECT name,path,size,logical_size,allocated_size,modified_at,cloud_only,"
         "hardlink_duplicate,clone_duplicate,shared_blocks,clone_refcount "
         "FROM files WHERE size>=? ORDER BY size DESC,name COLLATE NOCASE LIMIT 1500";
+    const char *compact_sql =
+        "SELECT f.name,d.id,f.size,f.logical_size,"
+        "COALESCE(f.allocated_size,f.size),f.modified_at,"
+        "(f.flags & 1)!=0,(f.flags & 2)!=0,(f.flags & 4)!=0,(f.flags & 8)!=0,"
+        "f.clone_refcount FROM files f JOIN directories d ON d.id=f.parent_id "
+        "WHERE f.size>=? ORDER BY f.size DESC,f.name COLLATE NOCASE LIMIT 1500";
     sqlite3_stmt *statement = NULL;
-    if (sqlite3_prepare_v2(database, sql, -1, &statement, NULL) != SQLITE_OK) {
+    if (sqlite3_prepare_v2(database,
+                           compact ? compact_sql : legacy_sql,
+                           -1,
+                           &statement,
+                           NULL) != SQLITE_OK) {
         sqlite_fail(database, "could not prepare cleanup query");
     }
     sqlite3_bind_int64(statement, 1, 50LL * 1024LL * 1024LL);
@@ -2151,18 +2453,28 @@ static void query_cleanup(const char *database_path, int limit, int64_t old_down
     fputs("{\"results\":[", stdout);
     while (emitted < limit && sqlite3_step(statement) == SQLITE_ROW) {
         const char *name = (const char *)sqlite3_column_text(statement, 0);
-        const char *path = (const char *)sqlite3_column_text(statement, 1);
+        char *directory_path = compact
+            ? directory_path_from_id(database, "main", sqlite3_column_int64(statement, 1))
+            : NULL;
+        char *file_path = compact ? join_path(directory_path, name) : NULL;
+        const char *path = compact
+            ? file_path
+            : (const char *)sqlite3_column_text(statement, 1);
         const char *category = cleanup_category(name,
                                                 path,
                                                 (int64_t)sqlite3_column_int64(statement, 5),
                                                 old_download_cutoff);
         if (!category) {
+            free(file_path);
+            free(directory_path);
             continue;
         }
         if (needs_comma) {
             fputc(',', stdout);
         }
-        write_cleanup_file_json(stdout, statement, category);
+        write_cleanup_file_json(stdout, statement, path, category);
+        free(file_path);
+        free(directory_path);
         needs_comma = true;
         emitted++;
     }
@@ -2211,6 +2523,47 @@ static void write_snapshot_totals(FILE *out, const SnapshotTotals *totals) {
             (unsigned long long)totals->directory_count);
 }
 
+static void sqlite_path_hash(sqlite3_context *context,
+                             int argument_count,
+                             sqlite3_value **arguments) {
+    (void)argument_count;
+    const char *path = (const char *)sqlite3_value_text(arguments[0]);
+    if (!path) {
+        sqlite3_result_null(context);
+        return;
+    }
+    unsigned char digest[PATH_HASH_BYTES];
+    path_hash(path, digest);
+    sqlite3_result_blob(context, digest, PATH_HASH_BYTES, SQLITE_TRANSIENT);
+}
+
+static void create_comparison_keys(sqlite3 *database,
+                                   const char *table,
+                                   const char *schema,
+                                   bool compact) {
+    char sql[512];
+    if (compact) {
+        snprintf(sql,
+                 sizeof(sql),
+                 "CREATE TEMP VIEW %s AS SELECT id,path_hash FROM %s.directories;",
+                 table,
+                 schema);
+    } else {
+        snprintf(sql,
+                 sizeof(sql),
+                 "CREATE TEMP TABLE %s(id INTEGER PRIMARY KEY,path_hash BLOB NOT NULL);"
+                 "INSERT INTO %s(id,path_hash) "
+                 "SELECT id,diskstatsx_path_hash(path) FROM %s.directories;"
+                 "CREATE UNIQUE INDEX %s_hash ON %s(path_hash);",
+                 table,
+                 table,
+                 schema,
+                 table,
+                 table);
+    }
+    sqlite_exec_checked(database, sql, "could not index snapshot paths for comparison");
+}
+
 static void query_compare(const char *before_database_path, const char *after_database_path) {
     sqlite3 *database = NULL;
     if (sqlite3_open_v2(before_database_path, &database, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
@@ -2227,9 +2580,35 @@ static void query_compare(const char *before_database_path, const char *after_da
     }
     sqlite3_finalize(attach);
 
+    bool before_compact = compact_snapshot(database);
+    sqlite3_stmt *schema_probe = NULL;
+    bool after_compact = sqlite3_prepare_v2(database,
+                                            "SELECT path_hash FROM other.directories LIMIT 0",
+                                            -1,
+                                            &schema_probe,
+                                            NULL) == SQLITE_OK;
+    sqlite3_finalize(schema_probe);
+    if (before_compact || after_compact) {
+        if (sqlite3_create_function(database,
+                                    "diskstatsx_path_hash",
+                                    1,
+                                    SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                    NULL,
+                                    sqlite_path_hash,
+                                    NULL,
+                                    NULL) != SQLITE_OK) {
+            sqlite_fail(database, "could not prepare snapshot path comparison");
+        }
+        sqlite_exec_checked(database,
+                            "PRAGMA temp_store=FILE;",
+                            "could not configure snapshot comparison");
+        create_comparison_keys(database, "before_keys", "main", before_compact);
+        create_comparison_keys(database, "after_keys", "other", after_compact);
+    }
+
     SnapshotTotals before = read_snapshot_totals(database, "main");
     SnapshotTotals after = read_snapshot_totals(database, "other");
-    const char *changes_sql =
+    const char *legacy_changes_sql =
         "WITH changes(name,path,before_size,after_size,before_logical,after_logical) AS ("
         "SELECT old_dir.name,old_dir.path,old_dir.size,COALESCE(new_dir.size,0),"
         "old_dir.logical_size,COALESCE(new_dir.logical_size,0) "
@@ -2244,8 +2623,31 @@ static void query_compare(const char *before_database_path, const char *after_da
         "SELECT name,path,before_size,after_size,before_logical,after_logical "
         "FROM changes WHERE before_size<>after_size OR before_logical<>after_logical "
         "ORDER BY ABS(after_size-before_size) DESC,path COLLATE NOCASE LIMIT 120";
+    const char *compact_changes_sql =
+        "WITH changes(old_id,new_id,name,before_size,after_size,before_logical,after_logical) AS ("
+        "SELECT old_dir.id,new_dir.id,old_dir.name,old_dir.size,COALESCE(new_dir.size,0),"
+        "old_dir.logical_size,COALESCE(new_dir.logical_size,0) "
+        "FROM before_keys old_key "
+        "JOIN main.directories old_dir ON old_dir.id=old_key.id "
+        "LEFT JOIN after_keys new_key ON new_key.path_hash=old_key.path_hash "
+        "LEFT JOIN other.directories new_dir ON new_dir.id=new_key.id "
+        "UNION ALL "
+        "SELECT NULL,new_dir.id,new_dir.name,0,new_dir.size,0,new_dir.logical_size "
+        "FROM after_keys new_key "
+        "JOIN other.directories new_dir ON new_dir.id=new_key.id "
+        "LEFT JOIN before_keys old_key ON old_key.path_hash=new_key.path_hash "
+        "WHERE old_key.id IS NULL"
+        ") "
+        "SELECT old_id,new_id,name,before_size,after_size,before_logical,after_logical "
+        "FROM changes WHERE before_size<>after_size OR before_logical<>after_logical "
+        "ORDER BY ABS(after_size-before_size) DESC,name COLLATE NOCASE LIMIT 120";
+    bool compact_comparison = before_compact || after_compact;
     sqlite3_stmt *changes = NULL;
-    if (sqlite3_prepare_v2(database, changes_sql, -1, &changes, NULL) != SQLITE_OK) {
+    if (sqlite3_prepare_v2(database,
+                           compact_comparison ? compact_changes_sql : legacy_changes_sql,
+                           -1,
+                           &changes,
+                           NULL) != SQLITE_OK) {
         sqlite_fail(database, "could not prepare comparison query");
     }
 
@@ -2266,19 +2668,32 @@ static void query_compare(const char *before_database_path, const char *after_da
             (long long)directory_delta);
     bool needs_comma = false;
     while (sqlite3_step(changes) == SQLITE_ROW) {
-        uint64_t before_size = (uint64_t)sqlite3_column_int64(changes, 2);
-        uint64_t after_size = (uint64_t)sqlite3_column_int64(changes, 3);
+        int offset = compact_comparison ? 1 : 0;
+        uint64_t before_size = (uint64_t)sqlite3_column_int64(changes, 2 + offset);
+        uint64_t after_size = (uint64_t)sqlite3_column_int64(changes, 3 + offset);
         int64_t delta = (int64_t)after_size - (int64_t)before_size;
         const char *kind = before_size == 0 ? "added" :
             after_size == 0 ? "removed" :
             delta > 0 ? "grown" : "shrunk";
+        char *reconstructed_path = NULL;
+        if (compact_comparison) {
+            bool from_before = sqlite3_column_type(changes, 0) != SQLITE_NULL;
+            reconstructed_path = directory_path_from_id(
+                database,
+                from_before ? "main" : "other",
+                sqlite3_column_int64(changes, from_before ? 0 : 1));
+        }
         if (needs_comma) {
             fputc(',', stdout);
         }
         fputs("{\"name\":", stdout);
-        json_write_escaped(stdout, (const char *)sqlite3_column_text(changes, 0));
+        json_write_escaped(stdout,
+                           (const char *)sqlite3_column_text(changes,
+                                                             compact_comparison ? 2 : 0));
         fputs(",\"path\":", stdout);
-        json_write_escaped(stdout, (const char *)sqlite3_column_text(changes, 1));
+        json_write_escaped(stdout, compact_comparison
+            ? reconstructed_path
+            : (const char *)sqlite3_column_text(changes, 1));
         fprintf(stdout,
                 ",\"beforeSize\":%llu,\"afterSize\":%llu,\"delta\":%lld,\"kind\":",
                 (unsigned long long)before_size,
@@ -2286,6 +2701,7 @@ static void query_compare(const char *before_database_path, const char *after_da
                 (long long)delta);
         json_write_escaped(stdout, kind);
         fputc('}', stdout);
+        free(reconstructed_path);
         needs_comma = true;
     }
     fputs("]}\n", stdout);
